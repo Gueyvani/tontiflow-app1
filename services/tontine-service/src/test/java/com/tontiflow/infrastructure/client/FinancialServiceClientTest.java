@@ -4,6 +4,10 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.web.client.RestClientResponseException;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -39,6 +43,10 @@ class FinancialServiceClientTest {
         if (httpServer != null) {
             httpServer.stop(0);
         }
+        // Decision R14-B3-B : ne jamais laisser un contexte de requete fictif
+        // fuiter vers le test suivant (tests sans RequestContextHolder actif
+        // par defaut, comme avant cette decision).
+        RequestContextHolder.resetRequestAttributes();
     }
 
     @Test
@@ -143,7 +151,15 @@ class FinancialServiceClientTest {
 
         assertThatThrownBy(() -> client.getBalance(10L, "Bearer irrelevant"))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageNotContaining("internal error");
+                .hasMessageNotContaining("internal error")
+                // Decision R14-B3-B (§4) : la cause technique exacte - ici une vraie
+                // reponse HTTP de Financial, avec son code de statut source - reste
+                // disponible en interne, meme si le contrat HTTP public (IllegalStateException,
+                // meme message) est strictement inchange.
+                .extracting(Throwable::getCause)
+                .isInstanceOf(RestClientResponseException.class)
+                .extracting(cause -> ((RestClientResponseException) cause).getStatusCode().value())
+                .isEqualTo(500);
     }
 
     @Test
@@ -162,6 +178,73 @@ class FinancialServiceClientTest {
         assertThatThrownBy(() -> client.getStatement(10L, "Bearer irrelevant"))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageNotContaining("internal error");
+    }
+
+    @Test
+    void recordContribution_whenIncomingRequestHasCorrelationId_forwardsItToFinancialService() throws IOException {
+        AtomicReference<String> receivedCorrelationId = new AtomicReference<>();
+
+        httpServer = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        httpServer.createContext("/internal/contributions", exchange -> {
+            receivedCorrelationId.set(exchange.getRequestHeaders().getFirst("X-Correlation-ID"));
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+        httpServer.start();
+
+        MockHttpServletRequest incomingRequest = new MockHttpServletRequest();
+        incomingRequest.addHeader("X-Correlation-ID", "abc-123-real-request");
+        RequestContextHolder.setRequestAttributes(new ServletRequestAttributes(incomingRequest));
+
+        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort());
+        client.recordContribution(1L, 1L, 1L, new BigDecimal("500.00"), "Bearer irrelevant");
+
+        assertThat(receivedCorrelationId.get()).isEqualTo("abc-123-real-request");
+    }
+
+    @Test
+    void getBalance_whenIncomingRequestHasCorrelationId_forwardsItToFinancialService() throws IOException {
+        AtomicReference<String> receivedCorrelationId = new AtomicReference<>();
+
+        httpServer = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        httpServer.createContext("/internal/accounts/10/TONTINE/balance", exchange -> {
+            receivedCorrelationId.set(exchange.getRequestHeaders().getFirst("X-Correlation-ID"));
+            writeJson(exchange, 200, "{\"currency\":\"MRU\",\"balance\":0.00}");
+        });
+        httpServer.start();
+
+        MockHttpServletRequest incomingRequest = new MockHttpServletRequest();
+        incomingRequest.addHeader("X-Correlation-ID", "def-456-real-request");
+        RequestContextHolder.setRequestAttributes(new ServletRequestAttributes(incomingRequest));
+
+        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort());
+        client.getBalance(10L, "Bearer irrelevant");
+
+        assertThat(receivedCorrelationId.get()).isEqualTo("def-456-real-request");
+    }
+
+    @Test
+    void recordContribution_whenNoIncomingCorrelationId_sendsNoCorrelationHeader() throws IOException {
+        AtomicReference<String> receivedCorrelationId = new AtomicReference<>();
+        AtomicReference<Boolean> headerPresent = new AtomicReference<>();
+
+        httpServer = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        httpServer.createContext("/internal/contributions", exchange -> {
+            headerPresent.set(exchange.getRequestHeaders().containsKey("X-Correlation-ID"));
+            receivedCorrelationId.set(exchange.getRequestHeaders().getFirst("X-Correlation-ID"));
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+        httpServer.start();
+
+        // Decision R14-B3-B (§3) : aucun contexte de requete entrante actif ici -
+        // comportement deja etabli avant cette decision, ne doit jamais generer
+        // un identifiant de remplacement.
+        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort());
+        client.recordContribution(1L, 1L, 1L, new BigDecimal("500.00"), "Bearer irrelevant");
+
+        assertThat(headerPresent.get()).isFalse();
+        assertThat(receivedCorrelationId.get()).isNull();
     }
 
     private static void writeJson(HttpExchange exchange, int status, String json) throws IOException {

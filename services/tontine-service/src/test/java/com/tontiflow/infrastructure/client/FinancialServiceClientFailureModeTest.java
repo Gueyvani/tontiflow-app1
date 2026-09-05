@@ -3,6 +3,8 @@ package com.tontiflow.infrastructure.client;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.web.client.ResourceAccessException;
+import org.springframework.web.client.RestClientResponseException;
 
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -77,7 +79,13 @@ class FinancialServiceClientFailureModeTest {
 
         long start = System.nanoTime();
         assertThatThrownBy(() -> client.recordContribution(1L, 1L, 1L, new BigDecimal("100.00"), "Bearer irrelevant"))
-                .isInstanceOf(IllegalStateException.class);
+                .isInstanceOf(IllegalStateException.class)
+                // Decision R14-B3-B (§4) : une erreur reseau/timeout doit rester
+                // distinguable en interne (ResourceAccessException) d'une vraie
+                // reponse HTTP de Financial - le contrat public (IllegalStateException,
+                // meme message) reste lui strictement inchange.
+                .extracting(Throwable::getCause)
+                .isInstanceOf(ResourceAccessException.class);
         long elapsedSeconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - start);
 
         // Doit se declencher proche des 5s configures, jamais rester bloque
@@ -128,6 +136,12 @@ class FinancialServiceClientFailureModeTest {
 
         assertThatThrownBy(() -> client.recordContribution(1L, 1L, 1L, new BigDecimal("100.00"), "Bearer irrelevant"))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageNotContaining("service unavailable");
+                .hasMessageNotContaining("service unavailable")
+                // Decision R14-B3-B (§4) : cause technique exacte conservee en
+                // interne (vraie reponse HTTP de Financial, code 503 source).
+                .extracting(Throwable::getCause)
+                .isInstanceOf(RestClientResponseException.class)
+                .extracting(cause -> ((RestClientResponseException) cause).getStatusCode().value())
+                .isEqualTo(503);
     }
 }
