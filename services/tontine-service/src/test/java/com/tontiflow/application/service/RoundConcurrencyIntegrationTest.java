@@ -71,6 +71,8 @@ class RoundConcurrencyIntegrationTest {
     private SuspendedRoundRetryScheduler suspendedRoundRetryScheduler;
     @Autowired
     private OrphanedCompletedRoundRetryScheduler orphanedCompletedRoundRetryScheduler;
+    @Autowired
+    private BlockedRoundRetryScheduler blockedRoundRetryScheduler;
 
     // ------------------------------------------------------------------
     // Étape 2 : deux assign-beneficiary concurrents sur le même round
@@ -116,6 +118,49 @@ class RoundConcurrencyIntegrationTest {
 
         Callable<Void> task = () -> {
             roundCompletionScheduler.completeExpiredRounds();
+            return null;
+        };
+
+        runConcurrently(task, task);
+
+        List<TontineRound> allRounds = roundRepository.findByTontineId(tontineId);
+        assertThat(allRounds).hasSize(2); // round #1 COMPLETED + round #2 PLANNED, jamais de doublon
+
+        TontineRound round1 = allRounds.stream().filter(r -> r.getRoundNumber() == 1).findFirst().orElseThrow();
+        assertThat(round1.getStatus()).isEqualTo(RoundStatus.COMPLETED);
+
+        List<TontineRound> round2Candidates = allRounds.stream().filter(r -> r.getRoundNumber() == 2).toList();
+        assertThat(round2Candidates).hasSize(1); // un seul round #2, jamais deux
+        assertThat(round2Candidates.get(0).getStatus()).isEqualTo(RoundStatus.PLANNED);
+    }
+
+    // ------------------------------------------------------------------
+    // Décision R14-B4-B : deux exécutions concurrentes du
+    // BlockedRoundRetryScheduler sur le même round BLOCKED — comblait le gap
+    // identifié à l'audit R14-B4 (aucun test de concurrence, ni H2 ni
+    // PostgreSQL, pour ce scheduler, contrairement aux trois autres déjà
+    // couverts ci-dessous). Même verrou pessimiste (findByIdForUpdate) et
+    // même revalidation du statut après acquisition du verrou que
+    // RoundCompletionScheduler (étape 3) : un seul des deux appels doit
+    // réellement traiter le round (l'autre le trouve déjà COMPLETED et
+    // ressort en no-op), produisant exactement un round suivant, jamais deux.
+    // ------------------------------------------------------------------
+    @Test
+    void concurrentBlockedRetry_onSameRound_createsExactlyOneNextRound() throws Exception {
+        UUID creator = UUID.randomUUID();
+        Long tontineId = createTontine(creator);
+        saveConfig(tontineId, RotationType.SEQUENTIAL);
+
+        // Pas de manipulation de endDate ici : contrairement a
+        // RoundCompletionScheduler.completeRoundAndCreateNext,
+        // BlockedRoundRetryScheduler.retryOneBlockedRound ne verifie jamais
+        // l'echeance - seuls le statut BLOCKED et la presence de la
+        // TontineConfig conditionnent le traitement (verifie par lecture du
+        // code, R14-B4 §2).
+        saveRound(tontineId, 1, RoundStatus.BLOCKED, null);
+
+        Callable<Void> task = () -> {
+            blockedRoundRetryScheduler.retryBlockedRounds();
             return null;
         };
 
