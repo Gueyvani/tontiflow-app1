@@ -1,0 +1,52 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      routes:
+        - id: user-service
+          uri: ${USER_SERVICE_URL:http://localhost:8081}
+          predicates:
+            - Path=/api/v1/users/**
+        - id: tontine-service
+          uri: ${TONTINE_SERVICE_URL:http://localhost:8082}
+          predicates:
+            - Path=/api/v1/tontines/**
+        - id: financial-service
+          uri: ${FINANCIAL_SERVICE_URL:http://localhost:8083}
+          predicates:
+            - Path=/api/v1/financials/**
+        - id: credit-service
+          uri: ${CREDIT_SERVICE_URL:http://localhost:8084}
+          predicates:
+            - Path=/api/v1/credits/**
+        - id: notification-service
+          uri: ${NOTIFICATION_SERVICE_URL:http://localhost:8085}
+          predicates:
+            - Path=/api/v1/notifications/**
+        - id: authentication-service
+          uri: ${AUTHENTICATION_SERVICE_URL:http://localhost:8086}
+          predicates:
+            - Path=/api/v1/auth/**,/api/v1/admin/**
+
+jwt:
+  public-key-location: ${JWT_PUBLIC_KEY_PATH}
+
+# Actuator limite au strict necessaire pour permettre une sonde de sante sans
+# JWT (orchestration - Docker/K8s) sans exposer d'informations sensibles
+# (decision R11, corrections techniques - meme pattern deja etabli par
+# config-service). env/beans/configprops/mappings/heapdump/shutdown restent
+# desactives (non inclus). SecurityConfig autorise explicitement /actuator/health
+# en lecture anonyme ; tout le reste de /actuator/** reste soumis a
+# anyExchange().authenticated().
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never

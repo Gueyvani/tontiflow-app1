@@ -1,0 +1,35 @@
+# Decision R12 (containerisation) - ne jamais envoyer dans le contexte
+# Docker : secrets, historique Git, artefacts de build deja generes,
+# fichiers IDE, logs, fichiers temporaires.
+
+.git/
+.github/
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+target/
+**/target/
+
+*.log
+logs/
+
+.env
+*.env.local
+*.pem
+*.key
+*.jks
+*.p12
+*.crt
+
+.DS_Store
+Thumbs.db
+
+# Artefacts d'inspection/scratch locaux a cette session, sans rapport
+# avec le contenu applicatif du monorepo.
+*.docx
+*.pptx
+*.zip

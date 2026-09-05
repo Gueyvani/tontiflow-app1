@@ -1,0 +1,46 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: user-service
+  datasource:
+    url: jdbc:postgresql://localhost:5433/user_db
+    username: postgres
+    # Decision R11 (corrections techniques) : aucune valeur par defaut - un
+    # mot de passe par defaut faible (root) demarrerait silencieusement en
+    # production si la variable n'etait pas positionnee. Absence de variable
+    # = echec explicite au demarrage, meme discipline que JWT_PUBLIC_KEY_PATH
+    # ci-dessous. Le profil de test (application-test.yml) ne depend jamais
+    # de cette variable : il remplace entierement ce bloc datasource par H2.
+    password: ${DB_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+# Securite JWT (RS256) : verification locale uniquement, aucune cle privee.
+# Emplacement externalise via variable d'environnement - aucune valeur par
+# defaut, aucune cle committee. Absence de variable = echec explicite au demarrage.
+jwt:
+  public-key-location: ${JWT_PUBLIC_KEY_PATH}
+
+# Actuator limite au strict necessaire pour permettre une sonde de sante sans
+# JWT (orchestration - Docker/K8s) sans exposer d'informations sensibles
+# (decision R11, corrections techniques - meme pattern deja etabli par
+# config-service). env/beans/configprops/mappings/heapdump/shutdown restent
+# desactives (non inclus). SecurityConfig autorise explicitement /actuator/health
+# en lecture anonyme ; tout le reste de /actuator/** reste soumis a
+# anyRequest().authenticated().
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never

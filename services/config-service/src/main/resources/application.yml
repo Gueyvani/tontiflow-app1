@@ -1,0 +1,37 @@
+server:
+  port: 8888
+
+spring:
+  application:
+    name: config-service
+  cloud:
+    config:
+      server:
+        native:
+          # Mode local : lit les fichiers depuis src/main/resources/config
+          search-locations: classpath:/config
+  profiles:
+    # Utilise le système de fichiers local au lieu d'un dépôt Git distant
+    active: native
+  # Authentification HTTP Basic service-to-service du Config Server. Aucune
+  # valeur par defaut, aucun credential committe : absence de variable =
+  # echec explicite au demarrage.
+  security:
+    user:
+      name: ${CONFIG_SERVER_USERNAME}
+      password: ${CONFIG_SERVER_PASSWORD}
+
+# Actuator limite au strict necessaire pour verifier reellement le demarrage
+# (health) sans exposer d'informations sensibles (env, beans, configprops,
+# mappings, heapdump, shutdown... restent desactives par defaut).
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      # Jamais de detail (composants, causes) sans authentification ; le
+      # detail resterait de toute facon non-sensible ici (pas de datasource,
+      # pas de dependance externe), mais "never" est le choix le plus sur.
+      show-details: never

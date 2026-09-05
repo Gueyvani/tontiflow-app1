@@ -1,0 +1,23 @@
+server:
+  port: 8761
+
+spring:
+  application:
+    name: discovery-service
+  # Authentification HTTP Basic service-to-service du serveur Eureka (dashboard
+  # + /eureka/**). Aucune valeur par defaut, aucun credential committe :
+  # absence de variable = echec explicite au demarrage.
+  security:
+    user:
+      name: ${EUREKA_USERNAME}
+      password: ${EUREKA_PASSWORD}
+
+eureka:
+  instance:
+    hostname: localhost
+  client:
+    # Le serveur Eureka ne doit pas s'enregistrer auprès de lui-même
+    register-with-eureka: false
+    fetch-registry: false
+    service-url:
+      defaultZone: http://${eureka.instance.hostname}:${server.port}/eureka/

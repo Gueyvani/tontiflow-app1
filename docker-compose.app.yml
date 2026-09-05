@@ -1,0 +1,313 @@
+# ==============================================================================
+# TontiFlow - Stack applicative containerisee (decision R12)
+#
+# Distinct de docker-compose.yml (PostgreSQL de developpement local existant,
+# jamais modifie par cette phase) : cette stack utilise son propre PostgreSQL
+# applicatif isole, ses propres volumes, son propre reseau.
+#
+# Usage :
+#   cp .env.app.example .env.app          # une seule fois, puis editer .env.app
+#   mkdir -p docker/keys && openssl genrsa -out docker/keys/private_key.pem 2048 \
+#     && openssl rsa -in docker/keys/private_key.pem -pubout -out docker/keys/public_key.pem
+#   docker compose --env-file .env.app -f docker-compose.app.yml up -d --build
+#
+# Voir docker/keys/README.md pour le mecanisme des cles JWT.
+#
+# IMPORTANT (audit R12) : config-service et discovery-service ne sont
+# reellement consommes par AUCUN autre service de ce monorepo (aucun
+# spring-cloud-config-client, aucun spring.config.import ; seul
+# authentication-service se connecte a Eureka, de maniere non bloquante).
+# Aucune dependance de demarrage artificielle n'est donc creee vers ces deux
+# services ci-dessous - ils sont demarres pour completude du parc uniquement.
+# ==============================================================================
+#
+# ISOLATION DE PROJET (decouverte reelle pendant la validation R12) : un nom
+# de projet explicite est indispensable ici. Sans lui, Docker Compose derive
+# le nom de projet du nom du repertoire ("tontiflow-app1"), identique a celui
+# utilise implicitement par le docker-compose.yml existant - et comme les deux
+# fichiers definissent une cle de service nommee "postgres", Compose associe
+# les deux par identite (projet + nom de service) independamment de
+# container_name, et a tente de "recreer" un conteneur tontiflow-postgres lors
+# du premier essai de cette phase. Verifie reellement : le volume de donnees
+# du PostgreSQL de developpement (tontiflow-app1_postgres_data) n'a PAS ete
+# affecte (containers et volumes sont des ressources distinctes), mais le nom
+# de projet explicite ci-dessous elimine definitivement toute ambiguite future.
+name: tontiflow-app-stack
+#
+# TOLERANCE DES HEALTHCHECKS (decouverte reelle pendant la validation R12,
+# test de redemarrage complet down/up) : un premier reglage (start_period: 30s,
+# retries: 6, interval: 10s => ~90s de tolerance totale) a reellement provoque
+# l'echec de "docker compose up -d" avec l'erreur "dependency failed to start:
+# container tontiflow-app-authentication-service is unhealthy", alors que le
+# service a fini par demarrer correctement quelques secondes plus tard (log
+# reel : "Started AuthenticationServiceApplication in 77.083 seconds, process
+# running for 87.05"). Les autres services JVM (user/financial/credit/
+# notification-service) ont montre des temps de demarrage reels comparables
+# (66 a 82 secondes) sur cette machine - la marge de ~90s etait donc trop
+# juste de maniere systemique, pas specifique a un seul service. Valeurs
+# elargies ci-dessous (start_period: 90s, retries: 10 => ~190s de tolerance)
+# pour absorber cette variance reelle sans jamais alterer le contenu du test
+# (/actuator/health uniquement, inchange).
+networks:
+  tontiflow-net:
+    driver: bridge
+
+volumes:
+  tontiflow_app_postgres_data:
+
+services:
+
+  # ----------------------------------------------------------------
+  # PostgreSQL applicatif isole (decision R12) - jamais tontiflow-postgres.
+  # ----------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: tontiflow-app-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER doit etre defini dans .env.app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD doit etre defini dans .env.app}
+      POSTGRES_DB: postgres
+      POSTGRES_MULTIPLE_DATABASES: user_db,tontine_db,financial_db,credit_db,notification_db,authentication_db,config_db,discovery_db
+    volumes:
+      - tontiflow_app_postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init/01-create-databases.sql:/docker-entrypoint-initdb.d/01-create-databases.sql:ro
+    networks: [tontiflow-net]
+    # Pas de port publie vers l'hote : accessible uniquement via le reseau
+    # Docker interne (point critique R12 - ports minimaux).
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:?}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ----------------------------------------------------------------
+  # discovery-service (Eureka) - non requis par les autres services pour
+  # demarrer (audit R12) ; expose ici sans etre une dependance bloquante.
+  # ----------------------------------------------------------------
+  discovery-service:
+    build:
+      context: .
+      dockerfile: services/discovery-service/Dockerfile
+    container_name: tontiflow-app-discovery-service
+    environment:
+      EUREKA_USERNAME: ${EUREKA_USERNAME:?EUREKA_USERNAME doit etre defini dans .env.app}
+      EUREKA_PASSWORD: ${EUREKA_PASSWORD:?EUREKA_PASSWORD doit etre defini dans .env.app}
+    networks: [tontiflow-net]
+    # Pas de port publie : aucun service ne le requiert pour demarrer.
+
+  # ----------------------------------------------------------------
+  # config-service - non consomme par aucun autre service (audit R12).
+  # ----------------------------------------------------------------
+  config-service:
+    build:
+      context: .
+      dockerfile: services/config-service/Dockerfile
+    container_name: tontiflow-app-config-service
+    environment:
+      CONFIG_SERVER_USERNAME: ${CONFIG_SERVER_USERNAME:?CONFIG_SERVER_USERNAME doit etre defini dans .env.app}
+      CONFIG_SERVER_PASSWORD: ${CONFIG_SERVER_PASSWORD:?CONFIG_SERVER_PASSWORD doit etre defini dans .env.app}
+    networks: [tontiflow-net]
+    # Pas de port publie.
+
+  # ----------------------------------------------------------------
+  # authentication-service - seul service ayant besoin de la cle PRIVEE
+  # (signature des tokens). Connexion Eureka tentee mais non bloquante.
+  # ----------------------------------------------------------------
+  authentication-service:
+    build:
+      context: .
+      dockerfile: services/authentication-service/Dockerfile
+    container_name: tontiflow-app-authentication-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/authentication_db
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?}
+      JWT_PUBLIC_KEY_PATH: file:/keys/public_key.pem
+      JWT_PRIVATE_KEY_PATH: file:/keys/private_key.pem
+      EUREKA_SERVER_HOST: discovery-service
+      EUREKA_USERNAME: ${EUREKA_USERNAME:?}
+      EUREKA_PASSWORD: ${EUREKA_PASSWORD:?}
+    volumes:
+      - ./docker/keys:/keys:ro
+    networks: [tontiflow-net]
+    # Pas de port publie : atteint uniquement via api-gateway ou le reseau
+    # Docker interne (point critique R12 - ports minimaux).
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8086/actuator/health | grep -q '\"status\":\"UP\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
+
+  user-service:
+    build:
+      context: .
+      dockerfile: services/user-service/Dockerfile
+    container_name: tontiflow-app-user-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/user_db
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?}
+      JWT_PUBLIC_KEY_PATH: file:/keys/public_key.pem
+    volumes:
+      - ./docker/keys:/keys:ro
+    networks: [tontiflow-net]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/actuator/health | grep -q '\"status\":\"UP\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
+
+  financial-service:
+    build:
+      context: .
+      dockerfile: services/financial-service/Dockerfile
+    container_name: tontiflow-app-financial-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/financial_db
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?}
+      JWT_PUBLIC_KEY_PATH: file:/keys/public_key.pem
+    volumes:
+      - ./docker/keys:/keys:ro
+    networks: [tontiflow-net]
+    # Pas de port publie (point critique R12) : financial-service n'est
+    # joignable que via le reseau Docker interne (tontine-service, Gateway
+    # pour /api/v1/financials/** - actuellement inutilise, /internal/**
+    # jamais routee).
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8083/actuator/health | grep -q '\"status\":\"UP\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
+
+  tontine-service:
+    build:
+      context: .
+      dockerfile: services/tontine-service/Dockerfile
+    container_name: tontiflow-app-tontine-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      financial-service:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/tontine_db
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?}
+      JWT_PUBLIC_KEY_PATH: file:/keys/public_key.pem
+      FINANCIAL_SERVICE_URL: http://financial-service:8083
+    volumes:
+      - ./docker/keys:/keys:ro
+    networks: [tontiflow-net]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8082/actuator/health | grep -q '\"status\":\"UP\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
+
+  credit-service:
+    build:
+      context: .
+      dockerfile: services/credit-service/Dockerfile
+    container_name: tontiflow-app-credit-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/credit_db
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?}
+      JWT_PUBLIC_KEY_PATH: file:/keys/public_key.pem
+    volumes:
+      - ./docker/keys:/keys:ro
+    networks: [tontiflow-net]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8084/actuator/health | grep -q '\"status\":\"UP\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: services/notification-service/Dockerfile
+    container_name: tontiflow-app-notification-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/notification_db
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?}
+      JWT_PUBLIC_KEY_PATH: file:/keys/public_key.pem
+    volumes:
+      - ./docker/keys:/keys:ro
+    networks: [tontiflow-net]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8085/actuator/health | grep -q '\"status\":\"UP\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
+
+  # ----------------------------------------------------------------
+  # api-gateway - seul point d'entree public (point critique R12 - ports
+  # minimaux : c'est le SEUL service dont le port est publie vers l'hote).
+  # depends_on/service_healthy ameliore l'ordre de demarrage mais ne
+  # garantit PAS a lui seul qu'un appel immediat apres reussira (le
+  # routage Gateway peut echouer transitoirement le temps que le pool de
+  # connexions HTTP s'etablisse) - voir rapport final.
+  # ----------------------------------------------------------------
+  api-gateway:
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
+    container_name: tontiflow-app-api-gateway
+    depends_on:
+      authentication-service:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+      tontine-service:
+        condition: service_healthy
+      financial-service:
+        condition: service_healthy
+      credit-service:
+        condition: service_healthy
+      notification-service:
+        condition: service_healthy
+    environment:
+      JWT_PUBLIC_KEY_PATH: file:/keys/public_key.pem
+      USER_SERVICE_URL: http://user-service:8081
+      TONTINE_SERVICE_URL: http://tontine-service:8082
+      FINANCIAL_SERVICE_URL: http://financial-service:8083
+      CREDIT_SERVICE_URL: http://credit-service:8084
+      NOTIFICATION_SERVICE_URL: http://notification-service:8085
+      AUTHENTICATION_SERVICE_URL: http://authentication-service:8086
+    volumes:
+      - ./docker/keys:/keys:ro
+    networks: [tontiflow-net]
+    # Port hote configurable (GATEWAY_HOST_PORT) : le port 8080 par defaut
+    # est deja occupe par un processus tiers sans rapport sur cette machine
+    # (decouvert reellement pendant la validation R12) - meme situation et
+    # meme contournement que R4-R11 (port 18080 utilise pour les validations
+    # manuelles). A l'interieur du reseau Docker, le service reste joignable
+    # sur le port 8080 standard (GATEWAY_SERVICE_URL inchange pour les autres
+    # conteneurs).
+    ports:
+      - "${GATEWAY_HOST_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health | grep -q '\"status\":\"UP\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 90s

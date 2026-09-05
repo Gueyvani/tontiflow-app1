@@ -1,0 +1,10 @@
+# Configuration partagee par defaut, servie par le backend natif de
+# config-service a toute application qui l'interroge (fichier "application.yml"
+# = profil implicite de Spring Cloud Config, applique quel que soit le nom
+# du client). Contenu minimal et non metier : au moment de cette sous-phase,
+# aucun service du monorepo n'est encore un Config Client reel (verifie par
+# recherche exhaustive). Cette propriete sert uniquement de marqueur pour
+# prouver, par un test HTTP reel, que le Config Server sert effectivement
+# un contenu reel et non vide.
+config-service:
+  marker: served-by-config-service

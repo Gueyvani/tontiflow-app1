@@ -1,0 +1,68 @@
+# Java & Maven
+target/
+*.class
+*.jar
+*.war
+*.ear
+*.nar
+*.zip
+*.tar.gz
+*.rar
+.mvn/community
+.mvn/wrapper/maven-wrapper.jar
+
+# Logs & Runtime Data
+*.log
+logs/
+*.sqlite
+
+.idea/
+*.iml
+.env
+
+# IDE & Editors
+# IntelliJ IDEA
+.idea/
+*.iws
+*.iml
+*.ipr
+out/
+
+# Eclipse
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+# VS Code
+.vscode/
+
+# OS Specific
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Docker & Infrastructure Local
+.env
+*.env.local
+# Decision R12 (containerisation) : fichier de secrets reel pour la stack
+# applicative docker-compose.app.yml (POSTGRES_PASSWORD, EUREKA_*,
+# CONFIG_SERVER_*) - distinct du .env de docker-compose.yml pour eviter
+# toute confusion entre les deux stacks. Seul .env.app.example (sans
+# secret reel) est committe.
+.env.app
+docker/data/
+
+# Security & Secrets
+*.pem
+*.key
+*.jks
+*.p12
+*.crt

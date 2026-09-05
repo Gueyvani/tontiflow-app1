@@ -1,0 +1,79 @@
+server:
+  port: ${SERVER_PORT:8086}
+
+spring:
+  application:
+    name: authentication-service
+  datasource:
+    url: jdbc:postgresql://localhost:5433/authentication_db
+    username: postgres
+    # Decision R11 (corrections techniques) : aucune valeur par defaut - un
+    # mot de passe par defaut faible (root) demarrerait silencieusement en
+    # production si la variable n'etait pas positionnee. Absence de variable
+    # = echec explicite au demarrage, meme discipline que JWT_PUBLIC_KEY_PATH
+    # ci-dessous. Le profil de test (application-test.yml) ne depend jamais
+    # de cette variable : il remplace entierement ce bloc datasource par H2.
+    password: ${DB_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+# Configuration du registre Eureka pour que le Gateway le trouve.
+# Le serveur Eureka exige desormais une authentification HTTP Basic
+# (voir discovery-service) : les identifiants sont transmis via l'URL,
+# convention standard prise en charge nativement par le client Eureka.
+# Defauts vides (et non absents) : sans variables d'environnement, ce
+# service demarre quand meme normalement (l'enregistrement Eureka echoue
+# simplement en 401, sans bloquer le demarrage - comportement deja existant
+# en cas d'indisponibilite du serveur Eureka).
+# Decision R12 (containerisation) : hote/port externalises (EUREKA_SERVER_HOST/
+# EUREKA_SERVER_PORT) avec des defauts identiques au comportement local actuel
+# (localhost:8761) - aucun changement de comportement hors Docker. En conteneur,
+# docker-compose.app.yml surcharge EUREKA_SERVER_HOST avec le nom DNS du
+# service ("discovery-service").
+eureka:
+  client:
+    service-url:
+      defaultZone: http://${EUREKA_USERNAME:}:${EUREKA_PASSWORD:}@${EUREKA_SERVER_HOST:localhost}:${EUREKA_SERVER_PORT:8761}/eureka/
+
+# Securite JWT (RS256) : les emplacements de cles sont obligatoires et
+# externalises via variables d'environnement - aucune valeur par defaut,
+# aucune cle committee. Absence de variable = echec explicite au demarrage.
+jwt:
+  private-key-resource: ${JWT_PRIVATE_KEY_PATH}
+  public-key-resource: ${JWT_PUBLIC_KEY_PATH}
+  issuer: authentication-service
+  access-token-ttl: 15m
+
+# Bootstrap du premier compte ROLE_ADMIN. Vide par defaut : aucun bootstrap
+# n'est effectue tant que cette propriete n'est pas explicitement renseignee.
+# Ne cree jamais de compte : l'email doit deja correspondre a un compte existant.
+rbac:
+  bootstrap:
+    admin-email: ${RBAC_BOOTSTRAP_ADMIN_EMAIL:}
+
+# Duree de vie du Refresh Token (format simplifie Spring Boot : d/h/m/s). Configurable,
+# distincte de jwt.access-token-ttl qui ne concerne que l'Access Token.
+refresh-token:
+  ttl: 30d
+
+# Actuator limite au strict necessaire pour permettre une sonde de sante sans
+# JWT (orchestration - Docker/K8s) sans exposer d'informations sensibles
+# (decision R11, corrections techniques - meme pattern deja etabli par
+# config-service). env/beans/configprops/mappings/heapdump/shutdown restent
+# desactives (non inclus). SecurityConfig autorise explicitement /actuator/health
+# en lecture anonyme ; tout le reste de /actuator/** reste soumis a
+# anyRequest().authenticated().
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
