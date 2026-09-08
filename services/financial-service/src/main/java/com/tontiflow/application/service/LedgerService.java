@@ -226,9 +226,15 @@ public class LedgerService {
      * (existait déjà, jamais lu — cf. rapport d'inspection R9). Compte
      * absent → liste vide, jamais de création (même principe que
      * {@link #getAccountBalance}). Mapping vers {@link LedgerLineDetail}
-     * effectué à l'intérieur de cette transaction en lecture seule — accès à
-     * {@code LedgerLine.getJournalEntry()} (chargement paresseux) avant
-     * fermeture de la session, sans dépendre d'Open Session In View.
+     * effectué à l'intérieur de cette transaction en lecture seule.
+     *
+     * <p><b>Décision R14-C-B</b> : {@code LedgerLine.getJournalEntry()} était
+     * accédé en chargement paresseux, un accès par ligne du relevé (N+1
+     * confirmé, audit R14-C). {@link
+     * LedgerLineRepository#findByFinancialAccount_Id} charge désormais
+     * {@code journalEntry} par {@code JOIN FETCH} dans la même requête —
+     * cette méthode n'a pas changé, seule la requête sous-jacente a été
+     * corrigée.</p>
      */
     @Transactional(readOnly = true)
     public List<LedgerLineDetail> getAccountStatement(Long ownerReference, FinancialAccountType accountType) {
