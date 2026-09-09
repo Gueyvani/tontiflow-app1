@@ -137,6 +137,39 @@ class RbacControllerIntegrationTest {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
     }
 
+    // Decision R14-E : preuve que la correction du N+1 (RoleService.findAll)
+    // ne change aucun comportement fonctionnel - un role avec plusieurs
+    // permissions les rapporte toutes sans doublon, et un role sans aucune
+    // permission (cas reel : ROLE_ADMIN cree par provisionAdmin ci-dessus)
+    // reste present dans la reponse plutot que d'etre silencieusement exclu.
+    @Test
+    void listRoles_withMultipleRolesAndPermissions_returnsEachRoleWithCorrectPermissions_noDuplicates() {
+        String adminToken = provisionAdmin("role-n1-admin@tontiflow.test");
+
+        Permission permA = persistPermission("N1_PERM_A");
+        Permission permB = persistPermission("N1_PERM_B");
+        persistRoleWithPermissions("ROLE_N1_WITH_PERMS", Set.of(permA, permB));
+        persistRole("ROLE_N1_EMPTY");
+
+        ResponseEntity<RoleResponse[]> response = restTemplate.exchange(
+                "/api/v1/admin/roles", HttpMethod.GET, withBearer(adminToken, null), RoleResponse[].class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        java.util.List<RoleResponse> roles = java.util.List.of(response.getBody());
+
+        // Aucun doublon (verifie l'absence de multiplication de lignes par JOIN FETCH).
+        assertThat(roles).extracting(RoleResponse::id).doesNotHaveDuplicates();
+
+        RoleResponse withPerms = roles.stream()
+                .filter(r -> r.name().equals("ROLE_N1_WITH_PERMS")).findFirst().orElseThrow();
+        assertThat(withPerms.permissions()).containsExactlyInAnyOrder("N1_PERM_A", "N1_PERM_B");
+
+        // Un role sans permission reste present (pas d'INNER JOIN silencieusement exclusif).
+        RoleResponse empty = roles.stream()
+                .filter(r -> r.name().equals("ROLE_N1_EMPTY")).findFirst().orElseThrow();
+        assertThat(empty.permissions()).isEmpty();
+    }
+
     @Test
     void addPermissionToRole_succeeds() {
         String adminToken = provisionAdmin("assoc-admin@tontiflow.test");

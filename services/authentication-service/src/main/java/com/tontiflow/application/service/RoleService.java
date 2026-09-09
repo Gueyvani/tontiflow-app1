@@ -54,16 +54,16 @@ public class RoleService {
     /**
      * Liste l'ensemble des rôles existants, avec leurs permissions déjà chargées.
      *
+     * <p>Décision R14-E : {@link RoleRepository#findAllWithPermissions()}
+     * charge {@code permissions} par {@code LEFT JOIN FETCH} en une seule
+     * requête (N+1 démontré et corrigé) — cette méthode n'a pas changé de
+     * comportement, seule la requête sous-jacente a été corrigée.</p>
+     *
      * @return tous les rôles
      */
     @Transactional(readOnly = true)
     public List<Role> findAll() {
-        List<Role> roles = roleRepository.findAll();
-        // Role.permissions est LAZY : on force son initialisation ici, pendant que la
-        // session Hibernate est encore active, pour que l'appelant (RbacController)
-        // puisse mapper vers RoleResponse sans LazyInitializationException.
-        roles.forEach(role -> role.getPermissions().size());
-        return roles;
+        return roleRepository.findAllWithPermissions();
     }
 
     /**

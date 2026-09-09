@@ -64,8 +64,11 @@ class RoleServiceTest {
 
     @Test
     void findAll_returnsAllRoles() {
+        // Decision R14-E : RoleService.findAll() delegue desormais a
+        // RoleRepository.findAllWithPermissions() (LEFT JOIN FETCH, corrige
+        // le N+1) plutot qu'a findAll() + initialisation lazy forcee.
         Role role = roleWithPermissions("ROLE_MEMBER", Set.of());
-        when(roleRepository.findAll()).thenReturn(List.of(role));
+        when(roleRepository.findAllWithPermissions()).thenReturn(List.of(role));
 
         List<Role> result = roleService.findAll();
 
