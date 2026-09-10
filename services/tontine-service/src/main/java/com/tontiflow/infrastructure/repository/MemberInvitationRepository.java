@@ -44,4 +44,20 @@ public interface MemberInvitationRepository extends JpaRepository<MemberInvitati
     @Query("UPDATE MemberInvitation i SET i.consumedAt = :now "
             + "WHERE i.tontineMemberId = :memberId AND i.consumedAt IS NULL")
     int consumeActiveInvitations(@Param("memberId") Long memberId, @Param("now") LocalDateTime now);
+
+    /**
+     * Consommation atomique conditionnelle d'une invitation précise (R20-C).
+     *
+     * <p>Point de sérialisation du claim : {@code WHERE ... consumed_at IS NULL}
+     * garantit qu'une seule requête concurrente peut consommer l'invitation.
+     * Retourne {@code 1} si cet appel a « gagné », {@code 0} si l'invitation
+     * était déjà consommée / n'existe pas — le claim doit alors échouer
+     * (HTTP 409 générique).</p>
+     *
+     * @return le nombre de lignes modifiées (0 ou 1)
+     */
+    @Modifying
+    @Query("UPDATE MemberInvitation i SET i.consumedAt = :now "
+            + "WHERE i.id = :id AND i.consumedAt IS NULL")
+    int consumeByIdIfActive(@Param("id") UUID id, @Param("now") LocalDateTime now);
 }

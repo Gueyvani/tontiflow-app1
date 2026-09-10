@@ -18,7 +18,9 @@ import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.HexFormat;
+import java.util.Locale;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 /**
  * Génération d'invitations de liaison pour un membre {@code PENDING}
@@ -44,9 +46,11 @@ import java.util.UUID;
 public class MemberInvitationService {
 
     /** Alphabet Crockford-like sans caractères ambigus (0/O/1/I/L). 31 symboles (~40 bits sur 8 caractères). */
-    private static final char[] CODE_ALPHABET =
-            "ABCDEFGHJKMNPQRSTUVWXYZ23456789".toCharArray();
+    private static final String CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    private static final char[] CODE_ALPHABET_CHARS = CODE_ALPHABET.toCharArray();
     private static final int CODE_LENGTH = 8;
+    /** Forme normalisée attendue d'un code de claim (après trim + toUpperCase). */
+    private static final Pattern CODE_PATTERN = Pattern.compile("^[" + CODE_ALPHABET + "]{" + CODE_LENGTH + "}$");
     private static final Duration INVITATION_TTL = Duration.ofDays(7);
     private static final String HASH_ALGORITHM = "SHA-256";
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
@@ -125,10 +129,87 @@ public class MemberInvitationService {
         return saved;
     }
 
+    /**
+     * Revendication d'une invitation par un utilisateur authentifié
+     * (R20-C). Lie le membre {@code PENDING} correspondant au compte du JWT
+     * ({@code callerUserId}) et le fait passer {@code ACTIVE}, en consommant
+     * l'invitation de façon atomique.
+     *
+     * <p>Anti-énumération : tout échec lié à l'invitation (inexistante,
+     * expirée, consommée, membre non-{@code PENDING}, incohérence de tontine,
+     * course perdue, mono-participation) lève une {@link IllegalStateException}
+     * au message générique {@code "Invitation invalide."} — mappée en
+     * HTTP 409 par {@code GlobalExceptionHandler}. Aucune information sur la
+     * cause exacte n'est renvoyée.</p>
+     *
+     * <p>Atomicité : {@code @Transactional}. Le point de sérialisation est
+     * {@link MemberInvitationRepository#consumeByIdIfActive} ; le garde-fou
+     * final de mono-participation en concurrence est la contrainte
+     * {@code uk_tontine_member_tontine_account}. Aucun verrou pessimiste,
+     * aucun {@code @Version}. Si l'écriture du membre échoue, toute la
+     * transaction est annulée : l'invitation redevient non consommée et le
+     * membre reste {@code PENDING}.</p>
+     *
+     * @param tontineId    tontine du chemin (doit correspondre à celle du membre)
+     * @param rawCode      code saisi (normalisé ici : {@code trim} + {@code toUpperCase})
+     * @param callerUserId identité du JWT ({@code sub}) — jamais fournie par le corps
+     * @return le membre devenu {@code ACTIVE}
+     * @throws IllegalStateException (→ 409) pour toute invalidité liée au claim
+     */
+    @Transactional
+    public TontineMember claim(Long tontineId, String rawCode, UUID callerUserId) {
+        String normalized = (rawCode == null ? "" : rawCode.trim().toUpperCase(Locale.ROOT));
+        if (!CODE_PATTERN.matcher(normalized).matches()) {
+            throw invalidInvitation();
+        }
+        String codeHash = sha256Hex(normalized);
+
+        MemberInvitation invitation = invitationRepository.findByCodeHash(codeHash)
+                .orElseThrow(MemberInvitationService::invalidInvitation);
+
+        LocalDateTime now = LocalDateTime.now();
+        if (invitation.getConsumedAt() != null || !invitation.getExpiresAt().isAfter(now)) {
+            throw invalidInvitation();
+        }
+
+        TontineMember member = memberRepository.findById(invitation.getTontineMemberId())
+                .orElseThrow(MemberInvitationService::invalidInvitation);
+        if (!member.getTontineId().equals(tontineId)) {
+            throw invalidInvitation();
+        }
+        if (member.getStatus() != MemberStatus.PENDING) {
+            throw invalidInvitation();
+        }
+
+        // Pré-check mono-participation : un compte = une seule part liée par tontine.
+        if (memberRepository.findByTontineIdAndAccountId(tontineId, callerUserId).isPresent()) {
+            throw invalidInvitation();
+        }
+
+        // Consommation atomique conditionnelle : 1 = gagné, 0 = déjà consommée / course perdue.
+        if (invitationRepository.consumeByIdIfActive(invitation.getId(), now) != 1) {
+            throw invalidInvitation();
+        }
+
+        member.setAccountId(callerUserId);
+        member.setStatus(MemberStatus.ACTIVE);
+        try {
+            return memberRepository.saveAndFlush(member);
+        } catch (DataIntegrityViolationException e) {
+            // Course de mono-participation (uk_tontine_member_tontine_account) :
+            // rollback complet — l'invitation redevient non consommée.
+            throw invalidInvitation();
+        }
+    }
+
+    private static IllegalStateException invalidInvitation() {
+        return new IllegalStateException("Invitation invalide.");
+    }
+
     private static String generateRawCode() {
         StringBuilder sb = new StringBuilder(CODE_LENGTH);
         for (int i = 0; i < CODE_LENGTH; i++) {
-            sb.append(CODE_ALPHABET[SECURE_RANDOM.nextInt(CODE_ALPHABET.length)]);
+            sb.append(CODE_ALPHABET_CHARS[SECURE_RANDOM.nextInt(CODE_ALPHABET_CHARS.length)]);
         }
         return sb.toString();
     }

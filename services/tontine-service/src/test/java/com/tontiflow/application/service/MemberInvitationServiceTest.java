@@ -166,4 +166,185 @@ class MemberInvitationServiceTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("non trouvé");
     }
+
+    // ================= R20-C : claim =================
+
+    private static final String VALID_CODE = "ABCDEFGH";
+    private static final UUID INV_ID = UUID.fromString("00000000-0000-0000-0000-0000000000aa");
+
+    private static String sha256Hex(String v) {
+        try {
+            return HexFormat.of().formatHex(
+                    MessageDigest.getInstance("SHA-256").digest(v.getBytes(StandardCharsets.UTF_8)));
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private static MemberInvitation activeInvitation(Long memberId) {
+        MemberInvitation inv = new MemberInvitation();
+        inv.setId(INV_ID);
+        inv.setTontineMemberId(memberId);
+        inv.setCodeHash(sha256Hex(VALID_CODE));
+        inv.setIssuedAt(LocalDateTime.now().minusHours(1));
+        inv.setExpiresAt(LocalDateTime.now().plusDays(6));
+        return inv;
+    }
+
+    @Test
+    void claim_withValidCode_linksMemberToJwtAccountAndActivates() {
+        UUID caller = UUID.randomUUID();
+        when(invitationRepository.findByCodeHash(sha256Hex(VALID_CODE)))
+                .thenReturn(Optional.of(activeInvitation(7L)));
+        when(memberRepository.findById(7L)).thenReturn(Optional.of(member(7L, 1L, MemberStatus.PENDING)));
+        when(memberRepository.findByTontineIdAndAccountId(1L, caller)).thenReturn(Optional.empty());
+        when(invitationRepository.consumeByIdIfActive(eq(INV_ID), any(LocalDateTime.class))).thenReturn(1);
+        when(memberRepository.saveAndFlush(any(TontineMember.class))).thenAnswer(i -> i.getArgument(0));
+
+        TontineMember result = service().claim(1L, VALID_CODE, caller);
+
+        assertThat(result.getStatus()).isEqualTo(MemberStatus.ACTIVE);
+        assertThat(result.getAccountId()).isEqualTo(caller);
+        var inOrder = org.mockito.Mockito.inOrder(invitationRepository, memberRepository);
+        inOrder.verify(invitationRepository).consumeByIdIfActive(eq(INV_ID), any(LocalDateTime.class));
+        inOrder.verify(memberRepository).saveAndFlush(any(TontineMember.class));
+    }
+
+    @Test
+    void claim_normalizesCode_trimAndUpperCase() {
+        UUID caller = UUID.randomUUID();
+        when(invitationRepository.findByCodeHash(sha256Hex(VALID_CODE)))
+                .thenReturn(Optional.of(activeInvitation(7L)));
+        when(memberRepository.findById(7L)).thenReturn(Optional.of(member(7L, 1L, MemberStatus.PENDING)));
+        when(memberRepository.findByTontineIdAndAccountId(1L, caller)).thenReturn(Optional.empty());
+        when(invitationRepository.consumeByIdIfActive(eq(INV_ID), any(LocalDateTime.class))).thenReturn(1);
+        when(memberRepository.saveAndFlush(any(TontineMember.class))).thenAnswer(i -> i.getArgument(0));
+
+        TontineMember result = service().claim(1L, "  abcdefgh \n", caller);
+
+        assertThat(result.getStatus()).isEqualTo(MemberStatus.ACTIVE);
+    }
+
+    @Test
+    void claim_withMalformedCode_isRejectedGenerically_withoutTouchingRepositories() {
+        assertThatThrownBy(() -> service().claim(1L, "abc", UUID.randomUUID()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Invitation invalide.");
+        assertThatThrownBy(() -> service().claim(1L, "AB0DEFGH", UUID.randomUUID())) // '0' hors alphabet
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Invitation invalide.");
+        verifyNoInteractions(invitationRepository, memberRepository);
+    }
+
+    @Test
+    void claim_withUnknownCode_isRejectedGenerically() {
+        when(invitationRepository.findByCodeHash(sha256Hex(VALID_CODE))).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service().claim(1L, VALID_CODE, UUID.randomUUID()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Invitation invalide.");
+    }
+
+    @Test
+    void claim_withExpiredInvitation_isRejectedGenerically() {
+        MemberInvitation inv = activeInvitation(7L);
+        inv.setExpiresAt(LocalDateTime.now().minusMinutes(1));
+        when(invitationRepository.findByCodeHash(sha256Hex(VALID_CODE))).thenReturn(Optional.of(inv));
+
+        assertThatThrownBy(() -> service().claim(1L, VALID_CODE, UUID.randomUUID()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Invitation invalide.");
+        verify(invitationRepository, org.mockito.Mockito.never()).consumeByIdIfActive(any(), any());
+    }
+
+    @Test
+    void claim_withConsumedInvitation_isRejectedGenerically() {
+        MemberInvitation inv = activeInvitation(7L);
+        inv.setConsumedAt(LocalDateTime.now().minusMinutes(1));
+        when(invitationRepository.findByCodeHash(sha256Hex(VALID_CODE))).thenReturn(Optional.of(inv));
+
+        assertThatThrownBy(() -> service().claim(1L, VALID_CODE, UUID.randomUUID()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Invitation invalide.");
+    }
+
+    @Test
+    void claim_whenMemberMissing_isRejectedGenerically() {
+        when(invitationRepository.findByCodeHash(sha256Hex(VALID_CODE)))
+                .thenReturn(Optional.of(activeInvitation(7L)));
+        when(memberRepository.findById(7L)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service().claim(1L, VALID_CODE, UUID.randomUUID()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Invitation invalide.");
+    }
+
+    @Test
+    void claim_whenTontineIdMismatch_isRejectedGenerically_withoutConsuming() {
+        when(invitationRepository.findByCodeHash(sha256Hex(VALID_CODE)))
+                .thenReturn(Optional.of(activeInvitation(7L)));
+        when(memberRepository.findById(7L)).thenReturn(Optional.of(member(7L, 999L, MemberStatus.PENDING)));
+
+        assertThatThrownBy(() -> service().claim(1L, VALID_CODE, UUID.randomUUID()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Invitation invalide.");
+        verify(invitationRepository, org.mockito.Mockito.never()).consumeByIdIfActive(any(), any());
+    }
+
+    @Test
+    void claim_whenMemberNotPending_isRejectedGenerically() {
+        when(invitationRepository.findByCodeHash(sha256Hex(VALID_CODE)))
+                .thenReturn(Optional.of(activeInvitation(7L)));
+        when(memberRepository.findById(7L)).thenReturn(Optional.of(member(7L, 1L, MemberStatus.ACTIVE)));
+
+        assertThatThrownBy(() -> service().claim(1L, VALID_CODE, UUID.randomUUID()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Invitation invalide.");
+    }
+
+    @Test
+    void claim_whenAccountAlreadyMemberOfTontine_isRejectedGenerically_beforeConsuming() {
+        UUID caller = UUID.randomUUID();
+        when(invitationRepository.findByCodeHash(sha256Hex(VALID_CODE)))
+                .thenReturn(Optional.of(activeInvitation(7L)));
+        when(memberRepository.findById(7L)).thenReturn(Optional.of(member(7L, 1L, MemberStatus.PENDING)));
+        when(memberRepository.findByTontineIdAndAccountId(1L, caller))
+                .thenReturn(Optional.of(member(3L, 1L, MemberStatus.ACTIVE)));
+
+        assertThatThrownBy(() -> service().claim(1L, VALID_CODE, caller))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Invitation invalide.");
+        verify(invitationRepository, org.mockito.Mockito.never()).consumeByIdIfActive(any(), any());
+    }
+
+    @Test
+    void claim_whenConditionalConsumeReturnsZero_isRejectedGenerically_lostRace() {
+        UUID caller = UUID.randomUUID();
+        when(invitationRepository.findByCodeHash(sha256Hex(VALID_CODE)))
+                .thenReturn(Optional.of(activeInvitation(7L)));
+        when(memberRepository.findById(7L)).thenReturn(Optional.of(member(7L, 1L, MemberStatus.PENDING)));
+        when(memberRepository.findByTontineIdAndAccountId(1L, caller)).thenReturn(Optional.empty());
+        when(invitationRepository.consumeByIdIfActive(eq(INV_ID), any(LocalDateTime.class))).thenReturn(0);
+
+        assertThatThrownBy(() -> service().claim(1L, VALID_CODE, caller))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Invitation invalide.");
+        verify(memberRepository, org.mockito.Mockito.never()).saveAndFlush(any());
+    }
+
+    @Test
+    void claim_whenMemberSaveHitsUniqueConstraint_isMappedTo409NotBubbledAsDataIntegrity() {
+        UUID caller = UUID.randomUUID();
+        when(invitationRepository.findByCodeHash(sha256Hex(VALID_CODE)))
+                .thenReturn(Optional.of(activeInvitation(7L)));
+        when(memberRepository.findById(7L)).thenReturn(Optional.of(member(7L, 1L, MemberStatus.PENDING)));
+        when(memberRepository.findByTontineIdAndAccountId(1L, caller)).thenReturn(Optional.empty());
+        when(invitationRepository.consumeByIdIfActive(eq(INV_ID), any(LocalDateTime.class))).thenReturn(1);
+        when(memberRepository.saveAndFlush(any(TontineMember.class)))
+                .thenThrow(new org.springframework.dao.DataIntegrityViolationException("uk_tontine_member_tontine_account"));
+
+        assertThatThrownBy(() -> service().claim(1L, VALID_CODE, caller))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Invitation invalide.");
+    }
 }
