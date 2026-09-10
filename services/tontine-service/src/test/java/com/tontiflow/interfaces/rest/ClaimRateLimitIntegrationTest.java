@@ -37,14 +37,15 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Prouve que le rate limiting (R21-B / D4) rejette en 429 <b>avant</b>
- * d'atteindre le contrôleur : {@link MemberInvitationService#claim} n'est
- * jamais invoqué pour les requêtes rejetées (donc aucun accès repository /
- * PostgreSQL). Seuil IP volontairement bas via {@code @SpringBootTest properties}.
+ * Prouve que le rate limiting par compte (R21-B / D4, dimension IP déplacée
+ * vers api-gateway en R21-C.A3.2) rejette en 429 <b>avant</b> d'atteindre le
+ * contrôleur : {@link MemberInvitationService#claim} n'est jamais invoqué pour
+ * les requêtes rejetées (donc aucun accès repository / PostgreSQL). Seuil
+ * compte volontairement bas via {@code @SpringBootTest properties}.
  */
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-        properties = {"claim-rate-limit.ip-per-minute=3", "claim-rate-limit.account-per-minute=100"})
+        properties = {"claim-rate-limit.account-per-minute=3"})
 @ActiveProfiles("test")
 @Import(JwtTestSecurityConfiguration.class)
 class ClaimRateLimitIntegrationTest {
@@ -74,7 +75,7 @@ class ClaimRateLimitIntegrationTest {
             assertThat(ok.getStatusCode()).isEqualTo(HttpStatus.OK);
         }
 
-        // 4e requête (même IP) : rejetée par le filtre.
+        // 4e requête (même compte) : rejetée par le filtre.
         ResponseEntity<String> limited = post(path, body, account);
         assertThat(limited.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
         assertThat(limited.getHeaders().getFirst(HttpHeaders.RETRY_AFTER)).isNotNull();

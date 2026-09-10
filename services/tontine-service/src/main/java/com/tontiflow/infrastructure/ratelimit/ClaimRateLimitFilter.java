@@ -37,13 +37,17 @@ import java.util.regex.Pattern;
  * R21-A / R21-B, option B). Aucun Redis, aucune dépendance externe, aucun
  * stockage persistant.
  *
- * <p>Deux compteurs indépendants à fenêtre glissante d'une minute : par IP
- * source ({@code getRemoteAddr()}) et par compte authentifié
- * ({@code UserContext.userId()} du JWT — jamais une valeur du corps). Le plus
- * restrictif s'applique. Au dépassement : réponse <b>429</b> avec en-tête
- * {@code Retry-After}, corps {@link ErrorResponse} générique — la requête est
- * rejetée <b>avant</b> d'atteindre le contrôleur (aucun accès à
- * l'invitation, à son hash, au repository ni à PostgreSQL).</p>
+ * <p>Compteur à fenêtre glissante d'une minute, par compte authentifié
+ * ({@code UserContext.userId()} du JWT — jamais une valeur du corps). Au
+ * dépassement : réponse <b>429</b> avec en-tête {@code Retry-After}, corps
+ * {@link ErrorResponse} générique — la requête est rejetée <b>avant</b>
+ * d'atteindre le contrôleur (aucun accès à l'invitation, à son hash, au
+ * repository ni à PostgreSQL).</p>
+ *
+ * <p>La dimension « par IP » a été déplacée dans {@code api-gateway}
+ * ({@code ClaimIpRateLimitFilter}) : derrière le Gateway, {@code getRemoteAddr()}
+ * y désignait le pair TCP du Gateway, potentiellement partagé entre
+ * utilisateurs (constat R21-C.A3 ; décision R21-C.A3.2, option O-B).</p>
  *
  * <p><b>Non distribué</b> : les compteurs sont par instance et remis à zéro
  * au redémarrage. C'est un palier de durcissement (risque P2), pas une
@@ -68,7 +72,6 @@ public class ClaimRateLimitFilter extends OncePerRequestFilter {
     /** Une entrée sans accès depuis 10 minutes est éligible à la purge. */
     private static final long STALE_MILLIS = 10 * 60_000L;
 
-    private final int ipPerMinute;
     private final int accountPerMinute;
     private final ObjectMapper objectMapper;
     private final LongSupplier clock;
@@ -78,15 +81,13 @@ public class ClaimRateLimitFilter extends OncePerRequestFilter {
 
     @Autowired
     public ClaimRateLimitFilter(
-            @Value("${claim-rate-limit.ip-per-minute:10}") int ipPerMinute,
             @Value("${claim-rate-limit.account-per-minute:5}") int accountPerMinute,
             ObjectMapper objectMapper) {
-        this(ipPerMinute, accountPerMinute, objectMapper, System::currentTimeMillis);
+        this(accountPerMinute, objectMapper, System::currentTimeMillis);
     }
 
     /** Constructeur de test : horloge injectable pour des scénarios déterministes. */
-    ClaimRateLimitFilter(int ipPerMinute, int accountPerMinute, ObjectMapper objectMapper, LongSupplier clock) {
-        this.ipPerMinute = ipPerMinute;
+    ClaimRateLimitFilter(int accountPerMinute, ObjectMapper objectMapper, LongSupplier clock) {
         this.accountPerMinute = accountPerMinute;
         this.objectMapper = objectMapper;
         this.clock = clock;
@@ -103,24 +104,23 @@ public class ClaimRateLimitFilter extends OncePerRequestFilter {
                                      @NonNull FilterChain filterChain) throws ServletException, IOException {
         long now = clock.getAsLong();
 
-        Window ipWindow = windows.computeIfAbsent("ip:" + request.getRemoteAddr(), k -> new Window());
         String accountId = currentAccountId();
-        Window accountWindow =
-                accountId == null ? null : windows.computeIfAbsent("acct:" + accountId, k -> new Window());
+        if (accountId == null) {
+            // Aucune identité authentifiée (cas théorique : ce filtre s'exécute
+            // après la chaîne de sécurité) : rien à limiter par compte.
+            filterChain.doFilter(request, response);
+            return;
+        }
 
-        long ipRetry = ipWindow.retryAfterSecondsIfExceeded(ipPerMinute, now);
-        long accountRetry = accountWindow == null ? 0L : accountWindow.retryAfterSecondsIfExceeded(accountPerMinute, now);
-        long retryAfter = Math.max(ipRetry, accountRetry);
+        Window accountWindow = windows.computeIfAbsent("acct:" + accountId, k -> new Window());
+        long retryAfter = accountWindow.retryAfterSecondsIfExceeded(accountPerMinute, now);
 
         if (retryAfter > 0L) {
             writeTooManyRequests(request, response, retryAfter);
             return;
         }
 
-        ipWindow.record(now);
-        if (accountWindow != null) {
-            accountWindow.record(now);
-        }
+        accountWindow.record(now);
         maybeSweep(now);
 
         filterChain.doFilter(request, response);

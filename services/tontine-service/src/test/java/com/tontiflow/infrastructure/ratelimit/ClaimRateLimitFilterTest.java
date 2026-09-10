@@ -2,7 +2,6 @@ package com.tontiflow.infrastructure.ratelimit;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tontiflow.UserContext;
-import jakarta.servlet.FilterChain;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockFilterChain;
@@ -23,24 +22,33 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * Tests unitaires de {@link ClaimRateLimitFilter} après R21-C.A3.2 : le
+ * filtre ne porte plus que la dimension <b>par compte</b> (la dimension IP
+ * est passée dans {@code api-gateway}). La clé reste l'UUID authentifié du
+ * {@link UserContext}, jamais une valeur du corps ni l'adresse réseau.
+ */
 class ClaimRateLimitFilterTest {
 
-    private static final int IP_LIMIT = 3;
     private static final int ACCOUNT_LIMIT = 2;
 
     private final ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
     private final AtomicLong now = new AtomicLong(1_000_000L);
     private final ClaimRateLimitFilter filter =
-            new ClaimRateLimitFilter(IP_LIMIT, ACCOUNT_LIMIT, objectMapper, now::get);
+            new ClaimRateLimitFilter(ACCOUNT_LIMIT, objectMapper, now::get);
 
     @AfterEach
     void clearContext() {
         SecurityContextHolder.clearContext();
     }
 
-    private static MockHttpServletRequest claimRequest(String ip) {
-        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/v1/tontines/1/members/claim");
-        request.setRemoteAddr(ip);
+    private static MockHttpServletRequest claimRequest() {
+        return claimRequest("POST", "/api/v1/tontines/1/members/claim");
+    }
+
+    private static MockHttpServletRequest claimRequest(String method, String uri) {
+        MockHttpServletRequest request = new MockHttpServletRequest(method, uri);
+        request.setRemoteAddr("10.0.0.1");
         return request;
     }
 
@@ -58,30 +66,26 @@ class ClaimRateLimitFilterTest {
     }
 
     @Test
-    void underIpLimit_requestPassesThrough() throws Exception {
-        for (int i = 0; i < IP_LIMIT; i++) {
+    void underAccountLimit_requestPassesThrough() throws Exception {
+        UUID account = UUID.randomUUID();
+        for (int i = 0; i < ACCOUNT_LIMIT; i++) {
+            authenticateAs(account);
             MockHttpServletResponse response = new MockHttpServletResponse();
-            assertThat(passesThrough(claimRequest("10.0.0.1"), response)).isTrue();
+            assertThat(passesThrough(claimRequest(), response)).isTrue();
             assertThat(response.getStatus()).isEqualTo(200);
         }
     }
 
     @Test
-    void underAccountLimit_requestPassesThrough() throws Exception {
+    void exceedingAccountLimit_yields429WithRetryAfter_andChainNotInvoked() throws Exception {
         UUID account = UUID.randomUUID();
         for (int i = 0; i < ACCOUNT_LIMIT; i++) {
             authenticateAs(account);
-            assertThat(passesThrough(claimRequest("10.0.0.9"), new MockHttpServletResponse())).isTrue();
+            passesThrough(claimRequest(), new MockHttpServletResponse());
         }
-    }
-
-    @Test
-    void exceedingIpLimit_yields429WithRetryAfter_andChainNotInvoked() throws Exception {
-        for (int i = 0; i < IP_LIMIT; i++) {
-            passesThrough(claimRequest("10.0.0.2"), new MockHttpServletResponse());
-        }
+        authenticateAs(account);
         MockHttpServletResponse response = new MockHttpServletResponse();
-        boolean passed = passesThrough(claimRequest("10.0.0.2"), response);
+        boolean passed = passesThrough(claimRequest(), response);
 
         assertThat(passed).isFalse();
         assertThat(response.getStatus()).isEqualTo(429);
@@ -94,40 +98,37 @@ class ClaimRateLimitFilterTest {
     }
 
     @Test
-    void exceedingAccountLimit_yields429_evenFromDifferentIps() throws Exception {
+    void accountLimit_isIndependentOfRemoteAddr() throws Exception {
         UUID account = UUID.randomUUID();
         for (int i = 0; i < ACCOUNT_LIMIT; i++) {
             authenticateAs(account);
-            passesThrough(claimRequest("10.0.1." + i), new MockHttpServletResponse());
+            MockHttpServletRequest request = claimRequest();
+            request.setRemoteAddr("10.0.1." + i);
+            passesThrough(request, new MockHttpServletResponse());
         }
         authenticateAs(account);
+        MockHttpServletRequest request = claimRequest();
+        request.setRemoteAddr("10.0.1.99");
         MockHttpServletResponse response = new MockHttpServletResponse();
-        boolean passed = passesThrough(claimRequest("10.0.1.99"), response);
 
-        assertThat(passed).isFalse();
+        assertThat(passesThrough(request, response)).isFalse();
         assertThat(response.getStatus()).isEqualTo(429);
-        assertThat(response.getHeader("Retry-After")).isNotNull();
     }
 
     @Test
     void afterWindowExpires_requestIsAcceptedAgain() throws Exception {
-        for (int i = 0; i < IP_LIMIT; i++) {
-            passesThrough(claimRequest("10.0.0.3"), new MockHttpServletResponse());
+        UUID account = UUID.randomUUID();
+        for (int i = 0; i < ACCOUNT_LIMIT; i++) {
+            authenticateAs(account);
+            passesThrough(claimRequest(), new MockHttpServletResponse());
         }
-        assertThat(passesThrough(claimRequest("10.0.0.3"), new MockHttpServletResponse())).isFalse();
+        authenticateAs(account);
+        assertThat(passesThrough(claimRequest(), new MockHttpServletResponse())).isFalse();
 
         now.addAndGet(61_000L); // au-delà de la fenêtre d'une minute
 
-        assertThat(passesThrough(claimRequest("10.0.0.3"), new MockHttpServletResponse())).isTrue();
-    }
-
-    @Test
-    void differentIps_haveIndependentCounters() throws Exception {
-        for (int i = 0; i < IP_LIMIT; i++) {
-            passesThrough(claimRequest("10.0.0.4"), new MockHttpServletResponse());
-        }
-        assertThat(passesThrough(claimRequest("10.0.0.4"), new MockHttpServletResponse())).isFalse();
-        assertThat(passesThrough(claimRequest("10.0.0.5"), new MockHttpServletResponse())).isTrue();
+        authenticateAs(account);
+        assertThat(passesThrough(claimRequest(), new MockHttpServletResponse())).isTrue();
     }
 
     @Test
@@ -136,40 +137,50 @@ class ClaimRateLimitFilterTest {
         UUID b = UUID.randomUUID();
         for (int i = 0; i < ACCOUNT_LIMIT; i++) {
             authenticateAs(a);
-            passesThrough(claimRequest("10.0.2.1"), new MockHttpServletResponse());
+            passesThrough(claimRequest(), new MockHttpServletResponse());
         }
         authenticateAs(a);
-        assertThat(passesThrough(claimRequest("10.0.2.2"), new MockHttpServletResponse())).isFalse();
+        assertThat(passesThrough(claimRequest(), new MockHttpServletResponse())).isFalse();
         authenticateAs(b);
-        assertThat(passesThrough(claimRequest("10.0.2.3"), new MockHttpServletResponse())).isTrue();
+        assertThat(passesThrough(claimRequest(), new MockHttpServletResponse())).isTrue();
+    }
+
+    @Test
+    void unauthenticatedRequest_isNeverLimited() throws Exception {
+        // Cas théorique (le filtre s'exécute après la chaîne de sécurité) :
+        // sans identité, aucune clé de compte → aucune limitation.
+        for (int i = 0; i < ACCOUNT_LIMIT + 5; i++) {
+            assertThat(passesThrough(claimRequest(), new MockHttpServletResponse())).isTrue();
+        }
     }
 
     @Test
     void nonClaimPath_isNeverLimited() throws Exception {
-        for (int i = 0; i < IP_LIMIT + 5; i++) {
-            MockHttpServletRequest request =
-                    new MockHttpServletRequest("POST", "/api/v1/tontines/1/members");
-            request.setRemoteAddr("10.0.0.6");
-            assertThat(passesThrough(request, new MockHttpServletResponse())).isTrue();
+        UUID account = UUID.randomUUID();
+        for (int i = 0; i < ACCOUNT_LIMIT + 5; i++) {
+            authenticateAs(account);
+            assertThat(passesThrough(claimRequest("POST", "/api/v1/tontines/1/members"),
+                    new MockHttpServletResponse())).isTrue();
         }
     }
 
     @Test
     void nonPostMethodOnClaimPath_isNeverLimited() throws Exception {
-        for (int i = 0; i < IP_LIMIT + 5; i++) {
-            MockHttpServletRequest request =
-                    new MockHttpServletRequest("GET", "/api/v1/tontines/1/members/claim");
-            request.setRemoteAddr("10.0.0.7");
-            assertThat(passesThrough(request, new MockHttpServletResponse())).isTrue();
+        UUID account = UUID.randomUUID();
+        for (int i = 0; i < ACCOUNT_LIMIT + 5; i++) {
+            authenticateAs(account);
+            assertThat(passesThrough(claimRequest("GET", "/api/v1/tontines/1/members/claim"),
+                    new MockHttpServletResponse())).isTrue();
         }
     }
 
     @Test
-    void concurrentRequestsOnSameKey_areThreadSafe_andBounded() throws Exception {
+    void concurrentRequestsOnSameAccount_areThreadSafe_andBounded() throws Exception {
         int limit = 5;
         int threads = 40;
         ClaimRateLimitFilter concurrentFilter =
-                new ClaimRateLimitFilter(limit, 1000, objectMapper, now::get);
+                new ClaimRateLimitFilter(limit, objectMapper, now::get);
+        UUID account = UUID.randomUUID();
 
         AtomicInteger allowed = new AtomicInteger();
         AtomicInteger rejected = new AtomicInteger();
@@ -182,7 +193,8 @@ class ClaimRateLimitFilterTest {
             pool.submit(() -> {
                 try {
                     start.await();
-                    MockHttpServletRequest request = claimRequest("10.9.9.9");
+                    authenticateAs(account);
+                    MockHttpServletRequest request = claimRequest();
                     MockHttpServletResponse response = new MockHttpServletResponse();
                     MockFilterChain chain = new MockFilterChain();
                     concurrentFilter.doFilter(request, response, chain);
@@ -194,6 +206,7 @@ class ClaimRateLimitFilterTest {
                 } catch (Exception e) {
                     errors.incrementAndGet();
                 } finally {
+                    SecurityContextHolder.clearContext();
                     done.countDown();
                 }
             });

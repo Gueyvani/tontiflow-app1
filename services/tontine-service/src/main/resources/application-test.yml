@@ -15,11 +15,10 @@ spring:
   flyway:
     enabled: false
 
-# Rate limiting du claim neutralise par defaut sous le profil test : les
-# suites existantes (MemberInvitationControllerIntegrationTest, ...) emettent
-# de nombreuses requetes depuis 127.0.0.1 et ne doivent pas etre limitees.
-# Les tests dedies (ClaimRateLimitFilterTest, ClaimRateLimitIntegrationTest)
-# fixent explicitement des seuils bas.
+# Rate limiting du claim (par compte) neutralise par defaut sous le profil
+# test : les suites existantes (MemberInvitationControllerIntegrationTest, ...)
+# emettent de nombreuses requetes et ne doivent pas etre limitees. Les tests
+# dedies (ClaimRateLimitFilterTest, ClaimRateLimitIntegrationTest) fixent
+# explicitement un seuil bas.
 claim-rate-limit:
-  ip-per-minute: 1000000
   account-per-minute: 1000000

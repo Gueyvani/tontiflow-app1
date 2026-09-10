@@ -38,12 +38,11 @@ financial-service:
   url: ${FINANCIAL_SERVICE_URL:http://localhost:8083}
 
 # Rate limiting local (in-JVM) de POST /api/v1/tontines/{tontineId}/members/claim
-# (decisions R21-A / R21-B, option B). Compteurs a fenetre glissante d'une
-# minute, par IP source et par compte authentifie (le plus restrictif
-# s'applique). Non distribue : compteurs par instance, remis a zero au
-# redemarrage. Au depassement : HTTP 429 + Retry-After, avant tout acces DB.
+# (decisions R21-A / R21-B, option B ; dimension IP deplacee vers api-gateway
+# en R21-C.A3.2). Compteur a fenetre glissante d'une minute, par compte
+# authentifie (UUID du JWT). Non distribue : compteurs par instance, remis a
+# zero au redemarrage. Au depassement : HTTP 429 + Retry-After, avant tout acces DB.
 claim-rate-limit:
-  ip-per-minute: ${CLAIM_RATE_LIMIT_IP_PER_MINUTE:10}
   account-per-minute: ${CLAIM_RATE_LIMIT_ACCOUNT_PER_MINUTE:5}
 
 # Actuator limite au strict necessaire pour permettre une sonde de sante sans

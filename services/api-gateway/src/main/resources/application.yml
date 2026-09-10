@@ -35,6 +35,20 @@ spring:
 jwt:
   public-key-location: ${JWT_PUBLIC_KEY_PATH}
 
+# Rate limiting IP local (in-JVM) de POST /api/v1/tontines/{tontineId}/members/claim
+# (decision R21-C.A3.2, option O-B). La dimension "par IP" est portee ici, au
+# point d'entree, ou l'adresse est celle du pair TCP reel ; la dimension "par
+# compte" (5/min) reste dans tontine-service. Fenetre glissante d'une minute,
+# NON distribue (compteurs par instance de Gateway, remis a zero au redemarrage).
+# trusted-proxy-count : 0 = X-Forwarded-For ignore (pair TCP uniquement, defaut
+# sur). Ne passer a > 0 que si un reverse proxy de confiance est place devant le
+# Gateway - valeur = nombre exact de proxies de confiance. Jamais de confiance
+# aveugle en X-Forwarded-For.
+claim-ip-rate-limit:
+  enabled: ${CLAIM_IP_RATE_LIMIT_ENABLED:true}
+  ip-per-minute: ${CLAIM_IP_RATE_LIMIT_IP_PER_MINUTE:10}
+  trusted-proxy-count: ${CLAIM_IP_RATE_LIMIT_TRUSTED_PROXY_COUNT:0}
+
 # Actuator limite au strict necessaire pour permettre une sonde de sante sans
 # JWT (orchestration - Docker/K8s) sans exposer d'informations sensibles
 # (decision R11, corrections techniques - meme pattern deja etabli par

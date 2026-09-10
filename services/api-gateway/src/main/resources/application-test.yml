@@ -14,3 +14,10 @@ spring:
       password: test
   flyway:
     enabled: false
+
+# Rate limiting IP du claim neutralise par defaut sous le profil test : les
+# suites existantes emettent de nombreuses requetes depuis 127.0.0.1 et ne
+# doivent pas etre limitees. Le test dedie (ClaimIpRateLimitIntegrationTest)
+# fixe explicitement un seuil bas via @SpringBootTest properties.
+claim-ip-rate-limit:
+  ip-per-minute: 1000000
