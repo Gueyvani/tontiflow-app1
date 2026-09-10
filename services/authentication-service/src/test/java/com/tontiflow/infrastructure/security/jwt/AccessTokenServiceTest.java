@@ -4,6 +4,7 @@ import com.tontiflow.UserContext;
 import com.tontiflow.security.jwt.JwtClaimNames;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.ExpiredJwtException;
+import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.SignatureException;
 import org.junit.jupiter.api.Test;
@@ -109,6 +110,59 @@ class AccessTokenServiceTest {
 
         assertThatThrownBy(() -> validatorWithWrongKey.validate(token))
                 .isInstanceOf(SignatureException.class);
+    }
+
+    @Test
+    void validate_whenSubjectAbsent_throwsJwtException() throws Exception {
+        KeyPair keyPair = generateRsaKeyPair();
+        AccessTokenService service = newService(keyPair, FIXED_NOW);
+
+        String token = Jwts.builder()
+                .claim(JwtClaimNames.ISSUED_AT, Date.from(FIXED_NOW))
+                .claim(JwtClaimNames.EXPIRATION, Date.from(FIXED_NOW.plus(Duration.ofMinutes(15))))
+                .claim(JwtClaimNames.USERNAME, "alice")
+                .claim(JwtClaimNames.EMAIL, "alice@tontiflow.test")
+                .claim(JwtClaimNames.ROLES, List.of("ROLE_USER"))
+                .signWith(keyPair.getPrivate(), Jwts.SIG.RS256)
+                .compact();
+
+        assertThatThrownBy(() -> service.validate(token)).isInstanceOf(JwtException.class);
+    }
+
+    @Test
+    void validate_whenSubjectBlank_throwsJwtException() throws Exception {
+        KeyPair keyPair = generateRsaKeyPair();
+        AccessTokenService service = newService(keyPair, FIXED_NOW);
+
+        String token = Jwts.builder()
+                .claim(JwtClaimNames.SUBJECT, "   ")
+                .claim(JwtClaimNames.ISSUED_AT, Date.from(FIXED_NOW))
+                .claim(JwtClaimNames.EXPIRATION, Date.from(FIXED_NOW.plus(Duration.ofMinutes(15))))
+                .claim(JwtClaimNames.USERNAME, "alice")
+                .claim(JwtClaimNames.EMAIL, "alice@tontiflow.test")
+                .claim(JwtClaimNames.ROLES, List.of("ROLE_USER"))
+                .signWith(keyPair.getPrivate(), Jwts.SIG.RS256)
+                .compact();
+
+        assertThatThrownBy(() -> service.validate(token)).isInstanceOf(JwtException.class);
+    }
+
+    @Test
+    void validate_whenSubjectNotUuid_throwsJwtException() throws Exception {
+        KeyPair keyPair = generateRsaKeyPair();
+        AccessTokenService service = newService(keyPair, FIXED_NOW);
+
+        String token = Jwts.builder()
+                .claim(JwtClaimNames.SUBJECT, "pas-un-uuid")
+                .claim(JwtClaimNames.ISSUED_AT, Date.from(FIXED_NOW))
+                .claim(JwtClaimNames.EXPIRATION, Date.from(FIXED_NOW.plus(Duration.ofMinutes(15))))
+                .claim(JwtClaimNames.USERNAME, "alice")
+                .claim(JwtClaimNames.EMAIL, "alice@tontiflow.test")
+                .claim(JwtClaimNames.ROLES, List.of("ROLE_USER"))
+                .signWith(keyPair.getPrivate(), Jwts.SIG.RS256)
+                .compact();
+
+        assertThatThrownBy(() -> service.validate(token)).isInstanceOf(JwtException.class);
     }
 
     @Test

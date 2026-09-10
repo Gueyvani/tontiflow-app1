@@ -4,6 +4,7 @@ import com.tontiflow.UserContext;
 import com.tontiflow.security.jwt.JwtClaimNames;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.MalformedJwtException;
 
 import java.security.PrivateKey;
 import java.security.PublicKey;
@@ -104,7 +105,16 @@ public final class AccessTokenService {
                 .parseSignedClaims(token)
                 .getPayload();
 
-        UUID userId = UUID.fromString(claims.get(JwtClaimNames.SUBJECT, String.class));
+        String subject = claims.get(JwtClaimNames.SUBJECT, String.class);
+        if (subject == null || subject.isBlank()) {
+            throw new MalformedJwtException("JWT subject absent ou vide");
+        }
+        final UUID userId;
+        try {
+            userId = UUID.fromString(subject);
+        } catch (IllegalArgumentException e) {
+            throw new MalformedJwtException("JWT subject invalide");
+        }
         String username = claims.get(JwtClaimNames.USERNAME, String.class);
         String email = claims.get(JwtClaimNames.EMAIL, String.class);
         Set<String> roles = readStringSet(claims, JwtClaimNames.ROLES);

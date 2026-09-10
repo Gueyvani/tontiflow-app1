@@ -136,6 +136,26 @@ class SecurityConfigIntegrationTest {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
     }
 
+    // --- Durcissement R21-B.1 : claim "sub" absent ou non-UUID -> 401 (pas 500) ---
+
+    @Test
+    void protectedEndpoint_withSignedTokenButSubjectAbsent_isRejectedWithUnauthorized() {
+        String token = signedTokenWithSubject(null);
+
+        ResponseEntity<String> response = exchangeWithBearer(token);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    }
+
+    @Test
+    void protectedEndpoint_withSignedTokenButSubjectNotUuid_isRejectedWithUnauthorized() {
+        String token = signedTokenWithSubject("pas-un-uuid");
+
+        ResponseEntity<String> response = exchangeWithBearer(token);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    }
+
     @Test
     void protectedEndpoint_withBasicSchemeInsteadOfBearer_isRejectedWithUnauthorized() {
         HttpHeaders headers = new HttpHeaders();
@@ -240,5 +260,25 @@ class SecurityConfigIntegrationTest {
                 .claim(JwtClaimNames.PERMISSIONS, List.copyOf(permissions))
                 .signWith(jwtTestKeyPair.getPrivate(), Jwts.SIG.RS256)
                 .compact();
+    }
+
+    /**
+     * Token RS256 correctement signé mais dont le claim {@code sub} est soit
+     * absent ({@code subject == null}), soit une valeur arbitraire non-UUID.
+     */
+    private String signedTokenWithSubject(String subject) {
+        var builder = Jwts.builder()
+                .claim(JwtClaimNames.ISSUED_AT, Date.from(Instant.now()))
+                .claim(JwtClaimNames.EXPIRATION, Date.from(Instant.now().plus(15, ChronoUnit.MINUTES)))
+                .claim(JwtClaimNames.JWT_ID, UUID.randomUUID().toString())
+                .claim(JwtClaimNames.ISSUER, "authentication-service")
+                .claim(JwtClaimNames.USERNAME, "alice")
+                .claim(JwtClaimNames.EMAIL, "alice@tontiflow.test")
+                .claim(JwtClaimNames.ROLES, List.of("ROLE_USER"))
+                .claim(JwtClaimNames.PERMISSIONS, List.of());
+        if (subject != null) {
+            builder.claim(JwtClaimNames.SUBJECT, subject);
+        }
+        return builder.signWith(jwtTestKeyPair.getPrivate(), Jwts.SIG.RS256).compact();
     }
 }
