@@ -88,8 +88,18 @@ public class TontineApplicationService {
      * @throws IllegalStateException    si l'utilisateur est déjà membre de cette tontine
      *                                  (unicité décidée explicitement, voir migration V4)
      */
+    /**
+     * Surcharge sans contact (compatibilité) — délègue avec
+     * {@code displayName}/{@code invitedPhone} à {@code null}.
+     */
     @Transactional
     public TontineMember addMember(Long tontineId, Long userId, int sequentialOrder, UUID callerUserId) {
+        return addMember(tontineId, userId, sequentialOrder, null, null, callerUserId);
+    }
+
+    @Transactional
+    public TontineMember addMember(Long tontineId, Long userId, int sequentialOrder,
+                                   String displayName, String invitedPhone, UUID callerUserId) {
         Tontine tontine = tontineRepository.findById(tontineId)
                 .orElseThrow(() -> new IllegalArgumentException("Tontine non trouvée"));
         requireCreator(tontine, callerUserId);
@@ -99,15 +109,18 @@ public class TontineApplicationService {
         });
 
         // Décision R18 D1 : un membre ajouté via l'API n'est pas encore lié à
-        // un compte TontiFlow authentifiable (aucun mécanisme de résolution ni
-        // d'invitation en périmètre R19). Il est donc créé PENDING, sans
+        // un compte TontiFlow authentifiable. Il est créé PENDING, sans
         // accountId — inéligible comme bénéficiaire/destinataire de décaissement
-        // (D5) jusqu'à sa liaison future par la personne elle-même.
+        // (D5) jusqu'à sa liaison via le mécanisme d'invitation (R20-C).
+        // displayName/invitedPhone : aides à l'invitation, optionnelles,
+        // jamais un profil utilisateur (cf. UserProfile).
         TontineMember member = new TontineMember();
         member.setTontineId(tontineId);
         member.setUserId(userId);
         member.setSequentialOrder(sequentialOrder);
         member.setStatus(MemberStatus.PENDING);
+        member.setDisplayName(displayName);
+        member.setInvitedPhone(invitedPhone);
         return memberRepository.save(member);
     }
 

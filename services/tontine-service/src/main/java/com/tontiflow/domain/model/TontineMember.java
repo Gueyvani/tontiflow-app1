@@ -47,6 +47,28 @@ public class TontineMember {
     @Column(name = "status", nullable = false, length = 16)
     private MemberStatus status = MemberStatus.PENDING;
 
+    /**
+     * Nom d'affichage saisi par le créateur au moment de l'ajout, pour
+     * l'aider à identifier la personne invitée. Optionnel.
+     *
+     * <p><b>Ce n'est pas le profil utilisateur</b> : {@code UserProfile}
+     * (user-service) reste l'unique source de vérité du profil d'un compte.
+     * Ce champ n'est qu'une aide à l'invitation, figée à l'ajout, jamais
+     * synchronisée avec {@code UserProfile}.</p>
+     */
+    @Column(name = "display_name")
+    private String displayName;
+
+    /**
+     * Numéro de téléphone d'invitation saisi par le créateur (optionnel) —
+     * destiné à permettre, dans une phase ultérieure, de joindre la personne
+     * pour lui transmettre son code. Même distinction que {@link #displayName}
+     * vis-à-vis de {@code UserProfile} : information d'invitation, pas un
+     * profil.
+     */
+    @Column(name = "invited_phone")
+    private String invitedPhone;
+
     private int sequentialOrder;
     private boolean active = true;
     private boolean suspended = false;
@@ -69,6 +91,12 @@ public class TontineMember {
 
     public MemberStatus getStatus() { return status; }
     public void setStatus(MemberStatus status) { this.status = status; }
+
+    public String getDisplayName() { return displayName; }
+    public void setDisplayName(String displayName) { this.displayName = displayName; }
+
+    public String getInvitedPhone() { return invitedPhone; }
+    public void setInvitedPhone(String invitedPhone) { this.invitedPhone = invitedPhone; }
 
     public int getSequentialOrder() { return sequentialOrder; }
     public void setSequentialOrder(int sequentialOrder) { this.sequentialOrder = sequentialOrder; }

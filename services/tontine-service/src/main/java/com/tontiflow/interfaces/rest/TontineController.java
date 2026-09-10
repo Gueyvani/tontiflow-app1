@@ -125,7 +125,8 @@ public class TontineController {
             @PathVariable Long tontineId, @Valid @RequestBody AddMemberRequest request, Authentication authentication) {
         UserContext caller = (UserContext) authentication.getPrincipal();
         TontineMember member = tontineApplicationService.addMember(
-                tontineId, request.userId(), request.sequentialOrder(), caller.userId());
+                tontineId, request.userId(), request.sequentialOrder(),
+                request.displayName(), request.invitedPhone(), caller.userId());
         return ResponseEntity.status(HttpStatus.CREATED).body(MemberResponse.from(member));
     }
 

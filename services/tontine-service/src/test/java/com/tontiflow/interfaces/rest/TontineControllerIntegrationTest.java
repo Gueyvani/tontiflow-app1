@@ -272,6 +272,27 @@ class TontineControllerIntegrationTest {
     }
 
     @Test
+    void addMember_withOptionalContact_persistsAndEchoesIt_withoutBreakingLegacyCalls() {
+        // R20-B : displayName / invitedPhone sont OPTIONNELS. Un ancien appel
+        // sans ces champs continue de fonctionner (cf. test ci-dessus) ; un
+        // appel qui les fournit les persiste et les renvoie.
+        UUID creator = UUID.randomUUID();
+        Long tontineId = createTontineAndGetId(creator);
+
+        ResponseEntity<String> add = exchangeWithBearer(HttpMethod.POST,
+                "/api/v1/tontines/" + tontineId + "/members",
+                "{\"userId\":7,\"sequentialOrder\":1,\"displayName\":\"Ahmed D.\",\"invitedPhone\":\"+22170000000\"}",
+                creator);
+        assertThat(add.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(add.getBody()).contains("\"displayName\":\"Ahmed D.\"").contains("\"invitedPhone\":\"+22170000000\"");
+
+        TontineMember persisted = memberRepository.findByTontineId(tontineId).get(0);
+        assertThat(persisted.getDisplayName()).isEqualTo("Ahmed D.");
+        assertThat(persisted.getInvitedPhone()).isEqualTo("+22170000000");
+        assertThat(persisted.getStatus()).isEqualTo(MemberStatus.PENDING);
+    }
+
+    @Test
     void activeMemberWithAccountId_persistsAndIsReadBack() {
         UUID creator = UUID.randomUUID();
         Long tontineId = createTontineAndGetId(creator);

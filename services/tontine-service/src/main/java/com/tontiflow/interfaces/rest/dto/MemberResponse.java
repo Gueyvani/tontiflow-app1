@@ -15,6 +15,9 @@ import java.util.UUID;
  *   <li>{@code accountId} : UUID du compte TontiFlow lié, {@code null} si le
  *       membre est {@code PENDING}.</li>
  *   <li>{@code status} : {@code PENDING} (non lié à un compte) ou {@code ACTIVE}.</li>
+ *   <li>{@code displayName}/{@code invitedPhone} : aides à l'invitation
+ *       saisies par le créateur (optionnelles). Aucun secret d'invitation
+ *       (code / hash) n'est jamais exposé ici.</li>
  * </ul>
  */
 public record MemberResponse(
@@ -23,6 +26,8 @@ public record MemberResponse(
         Long userId,
         UUID accountId,
         String status,
+        String displayName,
+        String invitedPhone,
         int sequentialOrder,
         boolean active
 ) {
@@ -30,6 +35,7 @@ public record MemberResponse(
         return new MemberResponse(
                 member.getId(), member.getTontineId(), member.getUserId(),
                 member.getAccountId(), member.getStatus().name(),
+                member.getDisplayName(), member.getInvitedPhone(),
                 member.getSequentialOrder(), member.isActive());
     }
 }
