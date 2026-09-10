@@ -107,6 +107,23 @@ class SecurityConfigIntegrationTest {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
     }
 
+    // --- Décision R21-B (D3) : JWT signé valide mais subject absent / non-UUID
+    //     → 401 propre (et non plus 500). ---
+
+    @Test
+    void protectedEndpoint_withSignedTokenButSubjectAbsent_isRejectedWithUnauthorized() {
+        ResponseEntity<String> response = exchangeWithBearer(signedTokenWithSubject(null));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    }
+
+    @Test
+    void protectedEndpoint_withSignedTokenButSubjectNotUuid_isRejectedWithUnauthorized() {
+        ResponseEntity<String> response = exchangeWithBearer(signedTokenWithSubject("pas-un-uuid"));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    }
+
     @Test
     void protectedEndpoint_withBasicSchemeInsteadOfBearer_isRejectedWithUnauthorized() {
         HttpHeaders headers = new HttpHeaders();
@@ -175,6 +192,23 @@ class SecurityConfigIntegrationTest {
 
     private String tokenExpiringAt(Instant expiresAt) {
         return tokenExpiringAt(expiresAt, Set.of("ROLE_USER"), Set.of());
+    }
+
+    /** Token correctement signé RS256 dont le claim {@code sub} est absent ({@code null}) ou tel quel. */
+    private String signedTokenWithSubject(String subject) {
+        var builder = Jwts.builder()
+                .claim(JwtClaimNames.ISSUED_AT, Date.from(Instant.now()))
+                .claim(JwtClaimNames.EXPIRATION, Date.from(Instant.now().plus(15, ChronoUnit.MINUTES)))
+                .claim(JwtClaimNames.JWT_ID, UUID.randomUUID().toString())
+                .claim(JwtClaimNames.ISSUER, "authentication-service")
+                .claim(JwtClaimNames.USERNAME, "alice")
+                .claim(JwtClaimNames.EMAIL, "alice@tontiflow.test")
+                .claim(JwtClaimNames.ROLES, List.of("ROLE_USER"))
+                .claim(JwtClaimNames.PERMISSIONS, List.of());
+        if (subject != null) {
+            builder.claim(JwtClaimNames.SUBJECT, subject);
+        }
+        return builder.signWith(jwtTestKeyPair.getPrivate(), Jwts.SIG.RS256).compact();
     }
 
     private String tokenExpiringAt(Instant expiresAt, Set<String> roles, Set<String> permissions) {

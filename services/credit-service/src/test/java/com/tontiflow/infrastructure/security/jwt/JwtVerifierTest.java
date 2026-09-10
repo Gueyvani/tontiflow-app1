@@ -3,6 +3,7 @@ package com.tontiflow.infrastructure.security.jwt;
 import com.tontiflow.UserContext;
 import com.tontiflow.security.jwt.JwtClaimNames;
 import io.jsonwebtoken.ExpiredJwtException;
+import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.MalformedJwtException;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.SignatureException;
@@ -73,6 +74,45 @@ class JwtVerifierTest {
     @Test
     void verify_withMalformedToken_throwsMalformedJwtException() {
         assertThrows(MalformedJwtException.class, () -> verifier.verify("ceci-n-est-pas-un-jwt"));
+    }
+
+    @Test
+    void verify_whenSubjectAbsent_throwsJwtException() {
+        String token = Jwts.builder()
+                .claim(JwtClaimNames.EXPIRATION, Date.from(Instant.now().plus(15, ChronoUnit.MINUTES)))
+                .claim(JwtClaimNames.USERNAME, "alice")
+                .claim(JwtClaimNames.EMAIL, "alice@tontiflow.test")
+                .claim(JwtClaimNames.ROLES, List.of("ROLE_USER"))
+                .signWith(privateKey, Jwts.SIG.RS256)
+                .compact();
+
+        assertThrows(JwtException.class, () -> verifier.verify(token));
+    }
+
+    @Test
+    void verify_whenSubjectBlank_throwsJwtException() {
+        String token = Jwts.builder()
+                .claim(JwtClaimNames.SUBJECT, "   ")
+                .claim(JwtClaimNames.EXPIRATION, Date.from(Instant.now().plus(15, ChronoUnit.MINUTES)))
+                .claim(JwtClaimNames.USERNAME, "alice")
+                .claim(JwtClaimNames.EMAIL, "alice@tontiflow.test")
+                .signWith(privateKey, Jwts.SIG.RS256)
+                .compact();
+
+        assertThrows(JwtException.class, () -> verifier.verify(token));
+    }
+
+    @Test
+    void verify_whenSubjectNotUuid_throwsJwtException() {
+        String token = Jwts.builder()
+                .claim(JwtClaimNames.SUBJECT, "pas-un-uuid")
+                .claim(JwtClaimNames.EXPIRATION, Date.from(Instant.now().plus(15, ChronoUnit.MINUTES)))
+                .claim(JwtClaimNames.USERNAME, "alice")
+                .claim(JwtClaimNames.EMAIL, "alice@tontiflow.test")
+                .signWith(privateKey, Jwts.SIG.RS256)
+                .compact();
+
+        assertThrows(JwtException.class, () -> verifier.verify(token));
     }
 
     @Test
