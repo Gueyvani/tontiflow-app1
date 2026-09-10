@@ -1,6 +1,7 @@
 package com.tontiflow.interfaces.rest;
 
 import com.tontiflow.domain.enums.ContributionFrequency;
+import com.tontiflow.domain.enums.MemberStatus;
 import com.tontiflow.domain.enums.RotationType;
 import com.tontiflow.domain.enums.RoundStatus;
 import com.tontiflow.domain.model.Tontine;
@@ -96,6 +97,8 @@ class TontineRoundControllerIntegrationTest {
         member.setTontineId(tontineId);
         member.setUserId(1L);
         member.setSequentialOrder(1);
+        member.setStatus(MemberStatus.ACTIVE);
+        member.setAccountId(UUID.randomUUID());
         memberRepository.save(member);
 
         TontineRound round = new TontineRound();
@@ -326,6 +329,8 @@ class TontineRoundControllerIntegrationTest {
         member.setTontineId(tontineId);
         member.setUserId(1L);
         member.setSequentialOrder(1);
+        member.setStatus(MemberStatus.ACTIVE);
+        member.setAccountId(UUID.randomUUID());
         member = memberRepository.save(member);
 
         ResponseEntity<String> response = exchangeWithBearer(
@@ -412,6 +417,8 @@ class TontineRoundControllerIntegrationTest {
         newBeneficiary.setTontineId(tontineId);
         newBeneficiary.setUserId(99L);
         newBeneficiary.setSequentialOrder(1);
+        newBeneficiary.setStatus(MemberStatus.ACTIVE);
+        newBeneficiary.setAccountId(UUID.randomUUID());
         Long newBeneficiaryId = memberRepository.save(newBeneficiary).getId();
 
         ResponseEntity<String> response = exchangeWithBearer(
@@ -432,6 +439,8 @@ class TontineRoundControllerIntegrationTest {
         member.setTontineId(tontineId);
         member.setUserId(1L);
         member.setSequentialOrder(1);
+        member.setStatus(MemberStatus.ACTIVE);
+        member.setAccountId(UUID.randomUUID());
         Long memberId = memberRepository.save(member).getId();
 
         TontineRound round = new TontineRound();

@@ -1,5 +1,6 @@
 package com.tontiflow.interfaces.rest;
 
+import com.tontiflow.domain.enums.MemberStatus;
 import com.tontiflow.domain.enums.RoundStatus;
 import com.tontiflow.domain.model.Tontine;
 import com.tontiflow.domain.model.TontineMember;
@@ -163,6 +164,8 @@ class RotationHistoryIntegrationTest {
         member.setTontineId(tontineId);
         member.setUserId(System.nanoTime()); // valeur arbitraire, unicite non requise ici
         member.setSequentialOrder(1);
+        member.setStatus(MemberStatus.ACTIVE);
+        member.setAccountId(UUID.randomUUID());
         return memberRepository.save(member).getId();
     }
 

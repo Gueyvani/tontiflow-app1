@@ -1,6 +1,7 @@
 package com.tontiflow.application.service;
 
 import com.tontiflow.domain.enums.ContributionFrequency;
+import com.tontiflow.domain.enums.MemberStatus;
 import com.tontiflow.domain.enums.RotationType;
 import com.tontiflow.domain.enums.RoundStatus;
 import com.tontiflow.domain.model.Tontine;
@@ -329,6 +330,8 @@ class RoundConcurrencyIntegrationTest {
         member.setTontineId(tontineId);
         member.setUserId(userId);
         member.setSequentialOrder(sequentialOrder);
+        member.setStatus(MemberStatus.ACTIVE);
+        member.setAccountId(UUID.randomUUID());
         return memberRepository.save(member).getId();
     }
 

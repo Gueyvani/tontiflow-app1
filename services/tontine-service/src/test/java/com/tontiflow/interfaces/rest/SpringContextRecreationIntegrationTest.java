@@ -4,6 +4,7 @@ import com.tontiflow.TontineServiceApplication;
 import com.tontiflow.application.service.OrphanedCompletedRoundRetryScheduler;
 import com.tontiflow.application.service.SuspendedRoundRetryScheduler;
 import com.tontiflow.domain.enums.ContributionFrequency;
+import com.tontiflow.domain.enums.MemberStatus;
 import com.tontiflow.domain.enums.RotationType;
 import com.tontiflow.domain.enums.RoundStatus;
 import com.tontiflow.domain.model.Tontine;
@@ -91,6 +92,8 @@ class SpringContextRecreationIntegrationTest {
         member.setTontineId(tontineId);
         member.setUserId(77L);
         member.setSequentialOrder(1);
+        member.setStatus(MemberStatus.ACTIVE);
+        member.setAccountId(UUID.randomUUID());
         Long memberId = memberRepository.save(member).getId();
 
         // --- Contexte Spring RECRÉÉ (pas un redémarrage JVM) ---

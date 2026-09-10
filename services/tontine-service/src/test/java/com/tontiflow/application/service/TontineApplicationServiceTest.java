@@ -1,6 +1,7 @@
 package com.tontiflow.application.service;
 
 import com.tontiflow.domain.enums.ContributionFrequency;
+import com.tontiflow.domain.enums.MemberStatus;
 import com.tontiflow.domain.enums.NonCompliantBehavior;
 import com.tontiflow.domain.enums.RotationType;
 import com.tontiflow.domain.model.Tontine;
@@ -160,6 +161,9 @@ class TontineApplicationServiceTest {
         assertThat(result.getTontineId()).isEqualTo(1L);
         assertThat(result.getUserId()).isEqualTo(42L);
         assertThat(result.getSequentialOrder()).isEqualTo(3);
+        // Décision R18 D1 : membre créé PENDING, non lié à un compte.
+        assertThat(result.getStatus()).isEqualTo(MemberStatus.PENDING);
+        assertThat(result.getAccountId()).isNull();
     }
 
     @Test

@@ -1,5 +1,6 @@
 package com.tontiflow.domain.service;
 
+import com.tontiflow.domain.enums.MemberStatus;
 import com.tontiflow.domain.enums.NonCompliantBehavior;
 import com.tontiflow.domain.model.TontineConfig;
 import com.tontiflow.domain.model.TontineMember;
@@ -27,6 +28,16 @@ class EligibilityEngineTest {
     void inactiveMember_isNotEligible() {
         TontineMember member = compliantMember(1L);
         member.setActive(false);
+
+        assertThat(engine.isEligible(member, compliantConfig(), List.of())).isFalse();
+    }
+
+    @Test
+    void pendingMember_isNotEligible() {
+        // Décision R18 D5 : un membre non lié à un compte TontiFlow (PENDING)
+        // ne peut jamais être bénéficiaire.
+        TontineMember member = compliantMember(1L);
+        member.setStatus(MemberStatus.PENDING);
 
         assertThat(engine.isEligible(member, compliantConfig(), List.of())).isFalse();
     }
@@ -102,6 +113,7 @@ class EligibilityEngineTest {
     private static TontineMember compliantMember(Long id) {
         TontineMember member = new TontineMember();
         member.setId(id);
+        member.setStatus(MemberStatus.ACTIVE);
         member.setActive(true);
         member.setSuspended(false);
         member.setExcluded(false);

@@ -1,6 +1,7 @@
 package com.tontiflow.application.service;
 
 import com.tontiflow.domain.enums.ContributionFrequency;
+import com.tontiflow.domain.enums.MemberStatus;
 import com.tontiflow.domain.enums.NonCompliantBehavior;
 import com.tontiflow.domain.enums.RotationType;
 import com.tontiflow.domain.model.Tontine;
@@ -97,10 +98,16 @@ public class TontineApplicationService {
             throw new IllegalStateException("Cet utilisateur est déjà membre de cette tontine");
         });
 
+        // Décision R18 D1 : un membre ajouté via l'API n'est pas encore lié à
+        // un compte TontiFlow authentifiable (aucun mécanisme de résolution ni
+        // d'invitation en périmètre R19). Il est donc créé PENDING, sans
+        // accountId — inéligible comme bénéficiaire/destinataire de décaissement
+        // (D5) jusqu'à sa liaison future par la personne elle-même.
         TontineMember member = new TontineMember();
         member.setTontineId(tontineId);
         member.setUserId(userId);
         member.setSequentialOrder(sequentialOrder);
+        member.setStatus(MemberStatus.PENDING);
         return memberRepository.save(member);
     }
 

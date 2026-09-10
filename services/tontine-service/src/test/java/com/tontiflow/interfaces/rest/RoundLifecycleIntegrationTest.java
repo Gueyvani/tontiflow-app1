@@ -3,6 +3,7 @@ package com.tontiflow.interfaces.rest;
 import com.tontiflow.application.service.RoundCompletionScheduler;
 import com.tontiflow.application.service.SuspendedRoundRetryScheduler;
 import com.tontiflow.domain.enums.ContributionFrequency;
+import com.tontiflow.domain.enums.MemberStatus;
 import com.tontiflow.domain.enums.RotationType;
 import com.tontiflow.domain.enums.RoundStatus;
 import com.tontiflow.domain.model.Tontine;
@@ -107,6 +108,15 @@ class RoundLifecycleIntegrationTest {
                     "{\"userId\":" + userId + ",\"sequentialOrder\":" + userId + "}", creator);
             assertThat(addMember.getStatusCode()).isEqualTo(HttpStatus.CREATED);
         }
+        // Les membres ajoutés via l'API sont PENDING (décision R18 D1) : aucun
+        // mécanisme de liaison à un compte n'existe encore (hors périmètre R19).
+        // On les passe ACTIVE directement en base pour exercer la rotation
+        // réelle — équivaut à l'effet d'un futur mécanisme d'invitation.
+        memberRepository.findByTontineId(tontineId).forEach(m -> {
+            m.setStatus(MemberStatus.ACTIVE);
+            m.setAccountId(java.util.UUID.randomUUID());
+            memberRepository.save(m);
+        });
 
         // --- ROUND #1 : verifie reellement la creation automatique (POST /tontines) ---
         List<TontineRound> roundsAfterCreation = roundRepository.findByTontineId(tontineId);
@@ -167,6 +177,8 @@ class RoundLifecycleIntegrationTest {
         member.setTontineId(tontineId);
         member.setUserId(42L);
         member.setSequentialOrder(1);
+        member.setStatus(MemberStatus.ACTIVE);
+        member.setAccountId(UUID.randomUUID());
         member = memberRepository.save(member);
         Long memberId = member.getId();
 

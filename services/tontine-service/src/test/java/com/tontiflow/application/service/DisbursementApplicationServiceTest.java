@@ -1,8 +1,11 @@
 package com.tontiflow.application.service;
 
+import com.tontiflow.domain.enums.MemberStatus;
 import com.tontiflow.domain.model.Tontine;
+import com.tontiflow.domain.model.TontineMember;
 import com.tontiflow.domain.model.TontineRound;
 import com.tontiflow.infrastructure.client.FinancialServiceClient;
+import com.tontiflow.infrastructure.repository.TontineMemberRepository;
 import com.tontiflow.infrastructure.repository.TontineRepository;
 import com.tontiflow.infrastructure.repository.TontineRoundRepository;
 import org.junit.jupiter.api.Test;
@@ -24,9 +27,10 @@ import static org.mockito.Mockito.*;
 /**
  * Tests unitaires de {@link DisbursementApplicationService} (décision R6) —
  * symétrique à {@code ContributionApplicationServiceTest} (décision R3).
- * Aucun {@code TontineMemberRepository} : le bénéficiaire est une donnée
- * serveur ({@code TontineRound.beneficiaryId}), pas une entrée client à
- * revalider par appartenance (cf. Javadoc de {@link DisbursementApplicationService}).
+ * Le bénéficiaire reste une donnée serveur ({@code TontineRound.beneficiaryId}),
+ * jamais une entrée client ; {@code TontineMemberRepository} n'est consulté
+ * que pour vérifier le statut du membre bénéficiaire (décision R18 D5 :
+ * PENDING interdit de décaissement).
  */
 @ExtendWith(MockitoExtension.class)
 class DisbursementApplicationServiceTest {
@@ -36,9 +40,18 @@ class DisbursementApplicationServiceTest {
     @Mock
     private TontineRoundRepository roundRepository;
     @Mock
+    private TontineMemberRepository memberRepository;
+    @Mock
     private FinancialServiceClient financialServiceClient;
 
     private DisbursementApplicationService service;
+
+    private static TontineMember member(Long id, MemberStatus status) {
+        TontineMember m = new TontineMember();
+        m.setId(id);
+        m.setStatus(status);
+        return m;
+    }
 
     private static Tontine tontine(Long id, UUID creator) {
         Tontine t = new Tontine();
@@ -58,7 +71,8 @@ class DisbursementApplicationServiceTest {
 
     @org.junit.jupiter.api.BeforeEach
     void setUp() {
-        service = new DisbursementApplicationService(tontineRepository, roundRepository, financialServiceClient);
+        service = new DisbursementApplicationService(
+                tontineRepository, roundRepository, memberRepository, financialServiceClient);
     }
 
     @Test
@@ -66,6 +80,7 @@ class DisbursementApplicationServiceTest {
         UUID creator = UUID.randomUUID();
         when(tontineRepository.findById(1L)).thenReturn(Optional.of(tontine(1L, creator)));
         when(roundRepository.findById(10L)).thenReturn(Optional.of(round(10L, 1L, new BigDecimal("5000.00"), 100L)));
+        when(memberRepository.findById(100L)).thenReturn(Optional.of(member(100L, MemberStatus.ACTIVE)));
 
         TontineRound result = service.recordDisbursement(1L, 10L, creator, "Bearer test-token");
 
@@ -142,9 +157,26 @@ class DisbursementApplicationServiceTest {
         UUID creator = UUID.randomUUID();
         when(tontineRepository.findById(1L)).thenReturn(Optional.of(tontine(1L, creator)));
         when(roundRepository.findById(10L)).thenReturn(Optional.of(round(10L, 1L, new BigDecimal("1234.56"), 100L)));
+        when(memberRepository.findById(100L)).thenReturn(Optional.of(member(100L, MemberStatus.ACTIVE)));
 
         service.recordDisbursement(1L, 10L, creator, "Bearer test-token");
 
         verify(financialServiceClient).recordDisbursement(eq(1L), eq(10L), eq(100L), eq(new BigDecimal("1234.56")), any());
+    }
+
+    // Décision R18 D5 : un bénéficiaire PENDING (non lié à un compte TontiFlow)
+    // ne peut pas recevoir de décaissement — aucun appel financial-service.
+    @Test
+    void recordDisbursement_withPendingBeneficiary_isRejected_andNoFinancialCallMade() {
+        UUID creator = UUID.randomUUID();
+        when(tontineRepository.findById(1L)).thenReturn(Optional.of(tontine(1L, creator)));
+        when(roundRepository.findById(10L)).thenReturn(Optional.of(round(10L, 1L, new BigDecimal("5000.00"), 100L)));
+        when(memberRepository.findById(100L)).thenReturn(Optional.of(member(100L, MemberStatus.PENDING)));
+
+        assertThatThrownBy(() -> service.recordDisbursement(1L, 10L, creator, "Bearer test-token"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("membre actif");
+
+        verifyNoInteractions(financialServiceClient);
     }
 }

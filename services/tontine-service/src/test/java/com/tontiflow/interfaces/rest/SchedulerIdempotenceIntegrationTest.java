@@ -4,6 +4,7 @@ import com.tontiflow.application.service.OrphanedCompletedRoundRetryScheduler;
 import com.tontiflow.application.service.RoundCompletionScheduler;
 import com.tontiflow.application.service.SuspendedRoundRetryScheduler;
 import com.tontiflow.domain.enums.ContributionFrequency;
+import com.tontiflow.domain.enums.MemberStatus;
 import com.tontiflow.domain.enums.RotationType;
 import com.tontiflow.domain.enums.RoundStatus;
 import com.tontiflow.domain.model.Tontine;
@@ -73,6 +74,8 @@ class SchedulerIdempotenceIntegrationTest {
         member.setTontineId(tontineId);
         member.setUserId(1L);
         member.setSequentialOrder(1);
+        member.setStatus(MemberStatus.ACTIVE);
+        member.setAccountId(UUID.randomUUID());
         Long memberId = memberRepository.save(member).getId();
 
         // 3 exécutions séquentielles explicites du même vrai bean Spring.

@@ -1,5 +1,7 @@
 package com.tontiflow.interfaces.rest;
 
+import com.tontiflow.domain.enums.MemberStatus;
+import com.tontiflow.domain.model.TontineMember;
 import com.tontiflow.infrastructure.repository.TontineMemberRepository;
 import com.tontiflow.infrastructure.repository.TontineRepository;
 import com.tontiflow.infrastructure.security.JwtTestSecurityConfiguration;
@@ -248,6 +250,44 @@ class TontineControllerIntegrationTest {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody()).contains("\"userId\":7");
+    }
+
+    @Test
+    void addMember_createsMemberAsPendingWithoutAccountId() {
+        // Décision R18 D1 : un membre ajouté via l'API n'est pas encore lié à
+        // un compte TontiFlow -> PENDING, accountId null.
+        UUID creator = UUID.randomUUID();
+        Long tontineId = createTontineAndGetId(creator);
+
+        exchangeWithBearer(HttpMethod.POST, "/api/v1/tontines/" + tontineId + "/members",
+                "{\"userId\":7,\"sequentialOrder\":1}", creator);
+
+        ResponseEntity<String> response = exchangeWithBearer(
+                HttpMethod.GET, "/api/v1/tontines/" + tontineId + "/members", null, creator);
+        assertThat(response.getBody()).contains("\"status\":\"PENDING\"").contains("\"accountId\":null");
+
+        TontineMember persisted = memberRepository.findByTontineId(tontineId).get(0);
+        assertThat(persisted.getStatus()).isEqualTo(MemberStatus.PENDING);
+        assertThat(persisted.getAccountId()).isNull();
+    }
+
+    @Test
+    void activeMemberWithAccountId_persistsAndIsReadBack() {
+        UUID creator = UUID.randomUUID();
+        Long tontineId = createTontineAndGetId(creator);
+        UUID account = UUID.randomUUID();
+
+        TontineMember member = new TontineMember();
+        member.setTontineId(tontineId);
+        member.setUserId(7L);
+        member.setSequentialOrder(1);
+        member.setStatus(MemberStatus.ACTIVE);
+        member.setAccountId(account);
+        Long id = memberRepository.save(member).getId();
+
+        TontineMember reloaded = memberRepository.findById(id).orElseThrow();
+        assertThat(reloaded.getStatus()).isEqualTo(MemberStatus.ACTIVE);
+        assertThat(reloaded.getAccountId()).isEqualTo(account);
     }
 
     @Test

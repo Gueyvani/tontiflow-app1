@@ -1,6 +1,7 @@
 package com.tontiflow.application.service;
 
 import com.tontiflow.domain.enums.ContributionFrequency;
+import com.tontiflow.domain.enums.MemberStatus;
 import com.tontiflow.domain.enums.NonCompliantBehavior;
 import com.tontiflow.domain.enums.RotationType;
 import com.tontiflow.domain.enums.RoundStatus;
@@ -352,6 +353,7 @@ class TontineRoundApplicationServiceTest {
         TontineMember newBeneficiary = new TontineMember();
         newBeneficiary.setId(9L);
         newBeneficiary.setTontineId(1L);
+        newBeneficiary.setStatus(MemberStatus.ACTIVE);
         when(roundRepository.findByIdForUpdate(5L)).thenReturn(Optional.of(round));
         when(tontineRepository.findById(1L)).thenReturn(Optional.of(tontineOwnedBy(creator)));
         when(memberRepository.findByTontineId(1L)).thenReturn(List.of(newBeneficiary));
@@ -423,6 +425,7 @@ class TontineRoundApplicationServiceTest {
         TontineMember newBeneficiary = new TontineMember();
         newBeneficiary.setId(9L);
         newBeneficiary.setTontineId(1L);
+        newBeneficiary.setStatus(MemberStatus.ACTIVE);
         when(roundRepository.findByIdForUpdate(5L)).thenReturn(Optional.of(round));
         when(tontineRepository.findById(1L)).thenReturn(Optional.of(tontineOwnedBy(creator)));
         when(memberRepository.findByTontineId(1L)).thenReturn(List.of(newBeneficiary));
@@ -434,6 +437,31 @@ class TontineRoundApplicationServiceTest {
         assertThat(result.getStatus()).isEqualTo(RoundStatus.ASSIGNED);
         verify(historyRepository).save(any());
         verify(roundRepository).save(round);
+    }
+
+    @Test
+    void replaceBeneficiary_whenNewBeneficiaryIsPending_isRejected() {
+        // Décision R18 D5 : un membre PENDING ne peut pas être désigné bénéficiaire.
+        UUID creator = UUID.randomUUID();
+        TontineRound round = new TontineRound();
+        round.setId(5L);
+        round.setTontineId(1L);
+        round.setBeneficiaryId(3L);
+        round.setStatus(RoundStatus.ASSIGNED);
+        TontineMember pendingBeneficiary = new TontineMember();
+        pendingBeneficiary.setId(9L);
+        pendingBeneficiary.setTontineId(1L);
+        pendingBeneficiary.setStatus(MemberStatus.PENDING);
+        when(roundRepository.findByIdForUpdate(5L)).thenReturn(Optional.of(round));
+        when(tontineRepository.findById(1L)).thenReturn(Optional.of(tontineOwnedBy(creator)));
+        when(memberRepository.findByTontineId(1L)).thenReturn(List.of(pendingBeneficiary));
+
+        assertThatThrownBy(() -> service().replaceBeneficiary(5L, 9L, "raison", "alice", creator))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("membre actif");
+
+        verify(roundRepository, never()).save(any());
+        verifyNoInteractions(historyRepository);
     }
 
     @Test

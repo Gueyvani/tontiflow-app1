@@ -1,9 +1,12 @@
 package com.tontiflow.interfaces.rest;
 
+import com.tontiflow.domain.enums.MemberStatus;
 import com.tontiflow.domain.enums.RoundStatus;
 import com.tontiflow.domain.model.Tontine;
+import com.tontiflow.domain.model.TontineMember;
 import com.tontiflow.domain.model.TontineRound;
 import com.tontiflow.infrastructure.client.FinancialServiceClient;
+import com.tontiflow.infrastructure.repository.TontineMemberRepository;
 import com.tontiflow.infrastructure.repository.TontineRepository;
 import com.tontiflow.infrastructure.repository.TontineRoundRepository;
 import com.tontiflow.infrastructure.security.JwtTestSecurityConfiguration;
@@ -59,6 +62,8 @@ class DisbursementIntegrationTest {
     private TontineRepository tontineRepository;
     @Autowired
     private TontineRoundRepository roundRepository;
+    @Autowired
+    private TontineMemberRepository memberRepository;
     @MockBean
     private FinancialServiceClient financialServiceClient;
 
@@ -75,14 +80,31 @@ class DisbursementIntegrationTest {
     void recordDisbursement_asCreator_withAssignedBeneficiary_succeeds() {
         UUID creator = UUID.randomUUID();
         Long tontineId = createTontineAndGetId(creator);
-        Long roundId = createRoundAndGetId(tontineId, new BigDecimal("5000.00"), 100L);
+        Long beneficiaryId = createMemberAndGetId(tontineId, MemberStatus.ACTIVE);
+        Long roundId = createRoundAndGetId(tontineId, new BigDecimal("5000.00"), beneficiaryId);
 
         ResponseEntity<String> response = exchangeWithBearer(
                 "/api/v1/tontines/" + tontineId + "/rounds/" + roundId + "/disbursements", creator);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         verify(financialServiceClient).recordDisbursement(
-                eq(tontineId), eq(roundId), eq(100L), eq(new BigDecimal("5000.00")), anyString());
+                eq(tontineId), eq(roundId), eq(beneficiaryId), eq(new BigDecimal("5000.00")), anyString());
+    }
+
+    // Décision R18 D5 : un bénéficiaire PENDING (non lié à un compte) ne peut
+    // pas recevoir de décaissement — 409, aucun appel financial-service.
+    @Test
+    void recordDisbursement_withPendingBeneficiary_isRejected_andNoFinancialCallMade() {
+        UUID creator = UUID.randomUUID();
+        Long tontineId = createTontineAndGetId(creator);
+        Long beneficiaryId = createMemberAndGetId(tontineId, MemberStatus.PENDING);
+        Long roundId = createRoundAndGetId(tontineId, new BigDecimal("5000.00"), beneficiaryId);
+
+        ResponseEntity<String> response = exchangeWithBearer(
+                "/api/v1/tontines/" + tontineId + "/rounds/" + roundId + "/disbursements", creator);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        verify(financialServiceClient, never()).recordDisbursement(any(), any(), any(), any(), anyString());
     }
 
     @Test
@@ -134,6 +156,18 @@ class DisbursementIntegrationTest {
         tontine.setCreatorUserId(creator);
         tontine.setCreatedAt(LocalDateTime.now());
         return tontineRepository.save(tontine).getId();
+    }
+
+    private Long createMemberAndGetId(Long tontineId, MemberStatus status) {
+        TontineMember member = new TontineMember();
+        member.setTontineId(tontineId);
+        member.setUserId(System.nanoTime());
+        member.setSequentialOrder(1);
+        member.setStatus(status);
+        if (status == MemberStatus.ACTIVE) {
+            member.setAccountId(UUID.randomUUID());
+        }
+        return memberRepository.save(member).getId();
     }
 
     private Long createRoundAndGetId(Long tontineId, BigDecimal amount, Long beneficiaryId) {

@@ -1,5 +1,6 @@
 package com.tontiflow.application.service;
 
+import com.tontiflow.domain.enums.MemberStatus;
 import com.tontiflow.domain.enums.RoundStatus;
 import com.tontiflow.domain.model.Tontine;
 import com.tontiflow.domain.model.TontineMember;
@@ -141,6 +142,8 @@ class ReplaceBeneficiaryAuditTest {
         member.setTontineId(tontineId);
         member.setUserId(userId);
         member.setSequentialOrder(1);
+        member.setStatus(MemberStatus.ACTIVE);
+        member.setAccountId(UUID.randomUUID());
         return memberRepository.save(member).getId();
     }
 

@@ -1,6 +1,7 @@
 package com.tontiflow.application.service;
 
 import com.tontiflow.domain.enums.ContributionFrequency;
+import com.tontiflow.domain.enums.MemberStatus;
 import com.tontiflow.domain.enums.RoundStatus;
 import com.tontiflow.domain.model.*;
 import com.tontiflow.domain.service.EligibilityEngine;
@@ -154,10 +155,17 @@ public class TontineRoundApplicationService {
         // vérité (même principe que le correctif R1), jamais une valeur
         // externe. Réutilise TontineMemberRepository.findByTontineId, déjà
         // utilisé par retryEligibility pour le même périmètre.
-        boolean belongsToTontine = memberRepository.findByTontineId(round.getTontineId()).stream()
-                .anyMatch(m -> m.getId().equals(newBeneficiaryId));
-        if (!belongsToTontine) {
-            throw new IllegalArgumentException("Le bénéficiaire indiqué n'appartient pas à cette tontine");
+        TontineMember newBeneficiary = memberRepository.findByTontineId(round.getTontineId()).stream()
+                .filter(m -> m.getId().equals(newBeneficiaryId))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "Le bénéficiaire indiqué n'appartient pas à cette tontine"));
+
+        // Décision R18 D5 : un membre PENDING (non lié à un compte TontiFlow)
+        // ne peut pas être désigné bénéficiaire.
+        if (newBeneficiary.getStatus() != MemberStatus.ACTIVE) {
+            throw new IllegalArgumentException(
+                    "Le bénéficiaire indiqué n'est pas un membre actif (non lié à un compte)");
         }
 
         Long previousBeneficiaryId = round.getBeneficiaryId();
