@@ -24,6 +24,10 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -31,6 +35,8 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -46,6 +52,7 @@ import static org.mockito.Mockito.when;
 class AuthAccountServiceTest {
 
     private static final String TEST_PASSWORD = "S3cur3-Test-Passw0rd!";
+    private static final Instant FIXED_NOW = Instant.parse("2026-01-01T00:00:00Z");
 
     @Mock
     private AuthAccountRepository authAccountRepository;
@@ -59,7 +66,18 @@ class AuthAccountServiceTest {
 
     @BeforeEach
     void setUp() {
-        authAccountService = new AuthAccountService(authAccountRepository, roleRepository, passwordEncoder);
+        authAccountService = newService(Clock.fixed(FIXED_NOW, ZoneOffset.UTC), 5, "15m", "15m");
+        // Par defaut "non verrouille" (1 ligne affectee) pour les tests qui atteignent le
+        // mot de passe correct sans se soucier du mecanisme de verrouillage lui-meme -
+        // verifie explicitement, avec des valeurs de retour dediees, dans les tests
+        // "Decision R21-D.3" ci-dessous. lenient() : les tests qui n'exercent jamais ce
+        // chemin (createAccount, assignRole, ...) ne stubbent pas cet appel.
+        lenient().when(authAccountRepository.resetFailedAttemptsIfNotLocked(any(), any())).thenReturn(1);
+    }
+
+    private AuthAccountService newService(Clock clock, int maxFailedAttempts, String failureWindow, String lockDuration) {
+        return new AuthAccountService(authAccountRepository, roleRepository, passwordEncoder, clock,
+                maxFailedAttempts, failureWindow, lockDuration);
     }
 
     @Test
@@ -135,6 +153,65 @@ class AuthAccountServiceTest {
         AuthAccount result = authAccountService.authenticate("active@tontiflow.test", TEST_PASSWORD);
 
         assertThat(result).isSameAs(account);
+    }
+
+    // ------------------------------------------------------------------
+    // Décision R21-D.3 : verrouillage temporisé de compte, indépendant du
+    // verrouillage manuel (AccountStatus.LOCKED) ci-dessus.
+    //
+    // Correction P1 (audit concurrence, cf. AuthAccountRepository) : le
+    // comptage / la fenêtre / le seuil sont désormais calculés par un UNIQUE
+    // UPDATE atomique et conditionnel côté base
+    // (registerFailedAttempt / resetFailedAttemptsIfNotLocked), donc non
+    // reproductibles avec un repository simulé (Mockito ne peut pas exécuter
+    // de SQL). Ces tests unitaires vérifient uniquement la DÉLÉGATION
+    // correcte (arguments transmis, branchement sur le résultat renvoyé) ;
+    // l'arithmétique elle-même (fenêtre, seuil, non-prolongation pendant un
+    // verrou actif) est prouvée par de vraies requêtes SQL dans
+    // AuthAccountRepositoryTest (H2 réel, séquentiel) et par
+    // AccountLockoutConcurrencyIntegrationTest (H2 réel, accès concurrent).
+    // ------------------------------------------------------------------
+
+    @Test
+    void authenticate_withWrongPassword_delegatesToRegisterFailedAttempt_withComputedWindowAndLockBounds() {
+        AuthAccount account = activeAccount("lockout1@tontiflow.test", TEST_PASSWORD);
+        when(authAccountRepository.findByEmail("lockout1@tontiflow.test")).thenReturn(Optional.of(account));
+
+        assertThatThrownBy(() -> authAccountService.authenticate("lockout1@tontiflow.test", "mauvais-mot-de-passe"))
+                .isInstanceOf(InvalidCredentialsException.class);
+
+        // Verifie que le service calcule et transmet exactement les bornes attendues a
+        // l'UPDATE atomique : fenetre glissante de 15 min, seuil 5, echeance de
+        // verrouillage a 15 min - sans jamais lire/ecrire ces champs lui-meme en Java.
+        verify(authAccountRepository).registerFailedAttempt(
+                account.getId(), FIXED_NOW, FIXED_NOW.minus(Duration.ofMinutes(15)), 5, FIXED_NOW.plus(Duration.ofMinutes(15)));
+    }
+
+    @Test
+    void authenticate_correctPasswordButResetReturnsZero_deniesWithGenericException_notAccountLockedException() {
+        // Simule un compte actuellement sous verrouillage temporise : l'UPDATE atomique
+        // n'affecte aucune ligne (WHERE non satisfaite cote base). La reponse doit rester
+        // IDENTIQUE a un mot de passe incorrect - jamais AccountLockedException/423
+        // (anti-enumeration, decision R21-D.3).
+        AuthAccount account = activeAccount("lockout2@tontiflow.test", TEST_PASSWORD);
+        when(authAccountRepository.findByEmail("lockout2@tontiflow.test")).thenReturn(Optional.of(account));
+        when(authAccountRepository.resetFailedAttemptsIfNotLocked(any(), any())).thenReturn(0);
+
+        assertThatThrownBy(() -> authAccountService.authenticate("lockout2@tontiflow.test", TEST_PASSWORD))
+                .isInstanceOf(InvalidCredentialsException.class)
+                .isNotInstanceOf(AccountLockedException.class);
+    }
+
+    @Test
+    void authenticate_correctPasswordAndResetSucceeds_delegatesWithCurrentTime_andProceeds() {
+        AuthAccount account = activeAccount("lockout3@tontiflow.test", TEST_PASSWORD);
+        when(authAccountRepository.findByEmail("lockout3@tontiflow.test")).thenReturn(Optional.of(account));
+        when(authAccountRepository.resetFailedAttemptsIfNotLocked(account.getId(), FIXED_NOW)).thenReturn(1);
+
+        AuthAccount result = authAccountService.authenticate("lockout3@tontiflow.test", TEST_PASSWORD);
+
+        assertThat(result).isSameAs(account);
+        verify(authAccountRepository).resetFailedAttemptsIfNotLocked(account.getId(), FIXED_NOW);
     }
 
     @Test

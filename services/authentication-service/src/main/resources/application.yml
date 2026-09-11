@@ -62,6 +62,20 @@ rbac:
 refresh-token:
   ttl: 30d
 
+# Verrouillage temporise du compte apres echecs d'authentification repetes
+# (decision R21-D.3, option B). Complete le rate limiting IP du Gateway
+# (auth-ip-rate-limit, R21-D.2) par une protection PAR COMPTE : resistante au
+# credential-stuffing distribue (plusieurs IP) et aux attaques lentes. Le
+# declenchement automatique reste indiscernable d'un mot de passe incorrect
+# (HTTP 401 generique) - jamais le HTTP 423 du verrouillage MANUEL/admin
+# (AccountStatus.LOCKED, inchange) - afin de preserver l'anti-enumeration
+# deja en place (voir AuthAccountService). failure-window/lock-duration au
+# format simplifie Spring Boot (d/h/m/s), meme convention que refresh-token.ttl.
+account-lockout:
+  max-failed-attempts: ${ACCOUNT_LOCKOUT_MAX_FAILED_ATTEMPTS:5}
+  failure-window: ${ACCOUNT_LOCKOUT_FAILURE_WINDOW:15m}
+  lock-duration: ${ACCOUNT_LOCKOUT_LOCK_DURATION:15m}
+
 # Actuator limite au strict necessaire pour permettre une sonde de sante sans
 # JWT (orchestration - Docker/K8s) sans exposer d'informations sensibles
 # (decision R11, corrections techniques - meme pattern deja etabli par

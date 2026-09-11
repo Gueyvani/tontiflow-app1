@@ -14,6 +14,7 @@ import jakarta.persistence.JoinTable;
 import jakarta.persistence.ManyToMany;
 import jakarta.persistence.Table;
 
+import java.time.Instant;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
@@ -62,6 +63,36 @@ public class AuthAccount {
     )
     private Set<Role> roles = new HashSet<>();
 
+    /**
+     * Nombre d'échecs d'authentification consécutifs dans la fenêtre
+     * courante (décision R21-D.3, verrouillage temporisé de compte —
+     * complète le rate limiting IP du Gateway par une protection par compte).
+     * Remis à zéro à chaque connexion réussie.
+     */
+    @Column(name = "failed_attempts", nullable = false)
+    private int failedAttempts = 0;
+
+    /**
+     * Horodatage du dernier échec d'authentification — ancre de la fenêtre
+     * glissante : au-delà de la fenêtre configurée, le compteur ci-dessus
+     * repart à 1 au lieu de s'incrémenter. {@code null} si aucun échec
+     * récent.
+     */
+    @Column(name = "last_failed_login_at")
+    private Instant lastFailedLoginAt;
+
+    /**
+     * Verrouillage temporisé et auto-expirant, déclenché automatiquement
+     * après trop d'échecs. {@code null} = aucun verrouillage automatique
+     * actif. À ne jamais confondre avec {@link AccountStatus#LOCKED}
+     * (verrouillage manuel/administratif, HTTP 423) : ce champ conditionne
+     * un rejet volontairement indiscernable d'un mot de passe incorrect
+     * (HTTP 401 générique), afin de préserver l'anti-énumération déjà en
+     * place dans {@code AuthAccountService}.
+     */
+    @Column(name = "locked_until")
+    private Instant lockedUntil;
+
     public AuthAccount() {
     }
 
@@ -103,5 +134,29 @@ public class AuthAccount {
 
     public void setRoles(Set<Role> roles) {
         this.roles = roles;
+    }
+
+    public int getFailedAttempts() {
+        return failedAttempts;
+    }
+
+    public void setFailedAttempts(int failedAttempts) {
+        this.failedAttempts = failedAttempts;
+    }
+
+    public Instant getLastFailedLoginAt() {
+        return lastFailedLoginAt;
+    }
+
+    public void setLastFailedLoginAt(Instant lastFailedLoginAt) {
+        this.lastFailedLoginAt = lastFailedLoginAt;
+    }
+
+    public Instant getLockedUntil() {
+        return lockedUntil;
+    }
+
+    public void setLockedUntil(Instant lockedUntil) {
+        this.lockedUntil = lockedUntil;
     }
 }
