@@ -43,39 +43,35 @@ import java.util.stream.Collectors;
 @Service
 public class AuthAccountService {
 
+    /** Table de délai fixe (décision R21-D.5, non configurable) — voir {@link AuthAccountRepository#registerFailedAttempt}. */
+    private static final Duration DELAY_AT_THREE_FAILURES = Duration.ofSeconds(2);
+    private static final Duration DELAY_AT_FOUR_FAILURES = Duration.ofSeconds(5);
+    private static final Duration DELAY_AT_FIVE_FAILURES = Duration.ofSeconds(10);
+    private static final Duration DELAY_AT_SIX_OR_MORE_FAILURES = Duration.ofSeconds(30);
+
     private final AuthAccountRepository authAccountRepository;
     private final RoleRepository roleRepository;
     private final PasswordEncoder passwordEncoder;
     private final Clock clock;
-    private final int maxFailedAttempts;
     private final Duration failureWindow;
-    private final Duration lockDuration;
 
     /**
-     * @param maxFailedAttempts nombre d'échecs consécutifs déclenchant le verrouillage
-     *                          temporisé (décision R21-D.3, défaut 5)
-     * @param failureWindow     fenêtre glissante au-delà de laquelle le compteur d'échecs
-     *                          repart à 1 au lieu de s'incrémenter (défaut 15 min), format
-     *                          simplifié Spring Boot ("15m") — même convention que
-     *                          {@code refresh-token.ttl}
-     * @param lockDuration      durée du verrouillage temporisé une fois déclenché (défaut
-     *                          15 min), même format simplifié
+     * @param failureWindow fenêtre glissante au-delà de laquelle le compteur d'échecs
+     *                      repart à 1 au lieu de s'incrémenter (défaut 15 min), format
+     *                      simplifié Spring Boot ("15m") — même convention que
+     *                      {@code refresh-token.ttl}
      */
     public AuthAccountService(AuthAccountRepository authAccountRepository, RoleRepository roleRepository,
                                PasswordEncoder passwordEncoder, Clock clock,
-                               @Value("${account-lockout.max-failed-attempts:5}") int maxFailedAttempts,
-                               @Value("${account-lockout.failure-window:15m}") String failureWindow,
-                               @Value("${account-lockout.lock-duration:15m}") String lockDuration) {
+                               @Value("${account-lockout.failure-window:15m}") String failureWindow) {
         this.authAccountRepository = authAccountRepository;
         this.roleRepository = roleRepository;
         this.passwordEncoder = passwordEncoder;
         this.clock = clock;
-        this.maxFailedAttempts = maxFailedAttempts;
         // DurationStyle.detectAndParse comprend le format simplifie ("15m", "15s", ...)
         // deja utilise pour jwt.access-token-ttl / refresh-token.ttl, garanti sans
         // ambiguite de conversion @Value (meme motif que RefreshTokenService).
         this.failureWindow = DurationStyle.detectAndParse(failureWindow);
-        this.lockDuration = DurationStyle.detectAndParse(lockDuration);
     }
 
     /**
@@ -142,97 +138,93 @@ public class AuthAccountService {
      * distincte, afin qu'une phase ultérieure (contrôleur de login) puisse
      * décider du traitement approprié.</p>
      *
-     * <p><strong>Verrouillage temporisé de compte (décision R21-D.3)</strong> :
-     * après {@link #maxFailedAttempts} échecs consécutifs dans la fenêtre
-     * {@link #failureWindow}, le compte est automatiquement bloqué pendant
-     * {@link #lockDuration}, complétant le rate limiting IP du Gateway
-     * ({@code AuthIpRateLimitFilter}, R21-D.2) par une protection par
-     * compte (credential-stuffing distribué, attaque lente). Ce blocage
-     * automatique est <b>volontairement indiscernable</b> d'un mot de passe
-     * incorrect : même exception ({@link InvalidCredentialsException}), même
-     * message, même coût (le hachage du mot de passe est toujours exécuté,
-     * qu'un blocage soit actif ou non) — afin de ne jamais révéler à un
-     * tiers qu'un compte donné existe et a été bloqué. Il est strictement
-     * distinct du verrouillage <b>manuel/administratif</b>
-     * ({@link AccountStatus#LOCKED}, {@link AccountLockedException}, HTTP
-     * 423), inchangé, qui reste réservé à une action explicite d'un
-     * administrateur déjà informé de l'existence du compte.</p>
+     * <p><strong>Ralentissement progressif (décision R21-D.5)</strong> : remplace le
+     * verrouillage dur de R21-D.3, qui permettait à quiconque connaissant un email
+     * de rendre un compte totalement inaccessible 15 minutes (constat D4-01,
+     * audit R21-D.4). Règle fondamentale, sans exception : <b>un mot de passe
+     * correct est toujours accepté immédiatement</b>, quel que soit l'état du
+     * ralentissement — voir le bloc {@code if (passwordMatches)} ci-dessous, qui
+     * ne consulte jamais {@code nextAttemptAllowedAt}. Seul un mot de passe
+     * <b>incorrect</b> peut déclencher/prolonger un délai avant la tentative
+     * suivante (table fixe, voir {@link AuthAccountRepository#registerFailedAttempt}).
+     * Ce ralentissement est <b>volontairement indiscernable</b> d'un simple mot
+     * de passe incorrect : même exception ({@link InvalidCredentialsException}),
+     * même message, même coût (le hachage du mot de passe est toujours exécuté
+     * avant toute décision). Strictement distinct du verrouillage
+     * <b>manuel/administratif</b> ({@link AccountStatus#LOCKED},
+     * {@link AccountLockedException}, HTTP 423), inchangé.</p>
      *
      * @param email       email du compte
      * @param rawPassword mot de passe en clair fourni pour la tentative
      * @return le compte authentifié (statut {@link AccountStatus#ACTIVE})
      * @throws AccountNotFoundException     si aucun compte ne correspond à l'email
-     * @throws InvalidCredentialsException  si le mot de passe ne correspond pas,
-     *                                      ou si un verrouillage temporisé est actif
+     * @throws InvalidCredentialsException  si le mot de passe ne correspond pas
      * @throws AccountLockedException       si le compte est {@link AccountStatus#LOCKED}
      *                                      (verrouillage manuel/administratif)
      * @throws AccountDisabledException     si le compte est {@link AccountStatus#DISABLED}
      */
     // noRollbackFor : meme necessite que RefreshTokenService.rotate() (reuse detection) -
-    // sans cela, l'enregistrement de l'echec (compteur, verrouillage temporise) serait
-    // annule par le rollback par defaut de Spring sur RuntimeException au moment meme ou
-    // InvalidCredentialsException est levee juste apres, videant le verrouillage de tout effet.
+    // sans cela, l'enregistrement de l'echec (compteur, delai) serait annule par le
+    // rollback par defaut de Spring sur RuntimeException au moment meme ou
+    // InvalidCredentialsException est levee juste apres, videant le ralentissement de tout effet.
     @Transactional(noRollbackFor = InvalidCredentialsException.class)
     public AuthAccount authenticate(String email, String rawPassword) {
         AuthAccount account = authAccountRepository.findByEmail(email)
                 .orElseThrow(() -> new AccountNotFoundException("Aucun compte pour cet email"));
 
-        // Toujours execute, meme si un verrouillage temporise est deja actif : le cout
-        // (hachage BCrypt) doit rester identique dans tous les cas ou l'email existe,
-        // pour ne jamais laisser un ecart de latence reveler l'etat de verrouillage.
+        // Toujours execute, meme si un ralentissement est actif : le cout (hachage BCrypt)
+        // doit rester identique dans tous les cas ou l'email existe, pour ne jamais laisser
+        // un ecart de latence reveler l'etat du ralentissement.
         boolean passwordMatches = passwordEncoder.matches(rawPassword, account.getPasswordHash());
-        Instant now = clock.instant();
 
-        if (!passwordMatches) {
-            // Correction P1 (audit R21-D.3) : l'enregistrement de l'echec est delegue a un
-            // UNIQUE UPDATE atomique et conditionnel cote base (voir
-            // AuthAccountRepository.registerFailedAttempt) - aucune lecture Java
-            // intermediaire du compteur, donc aucun lost update possible sous concurrence
-            // (deux executions concurrentes sur le meme compte sont serialisees par le
-            // verrou de ligne pris par l'UPDATE lui-meme). Le WHERE de cette requete exclut
-            // deja les comptes sous verrouillage actif (aucune prolongation) : la valeur de
-            // retour n'a pas besoin d'etre interpretee ici, la reponse est identique dans
-            // tous les cas (generique, ci-dessous).
-            authAccountRepository.registerFailedAttempt(account.getId(), now, now.minus(failureWindow),
-                    maxFailedAttempts, now.plus(lockDuration));
-            throw new InvalidCredentialsException("Mot de passe incorrect");
-        }
+        if (passwordMatches) {
+            // REGLE CRITIQUE (R21-D.5) : acceptation INCONDITIONNELLE - jamais de lecture
+            // ni de condition sur nextAttemptAllowedAt ici. C'est la propriete qui elimine
+            // le deni de service par verrouillage (D4-01) : aucune sequence de mauvais mots
+            // de passe, envoyee par quiconque, ne peut empecher le titulaire legitime de se
+            // connecter avec son vrai mot de passe, a tout moment.
+            //
+            // Correction concurrence (verification post-implementation R21-D.5) : remise a
+            // zero deleguee a un UPDATE atomique et scoping-minimal cote base (voir
+            // AuthAccountRepository.resetFailedAttempts) plutot qu'a une mutation de
+            // l'entite geree - evite un UPDATE implicite Hibernate portant sur TOUTES les
+            // colonnes de l'entite (email/password_hash/status compris, non concernees par
+            // ce reset). Inconditionnelle en temps (pas de WHERE sur locked_until), pour
+            // que le mot de passe correct reste toujours accepte immediatement.
+            authAccountRepository.resetFailedAttempts(account.getId());
 
-        // Mot de passe correct : la remise a zero est elle-meme conditionnee, dans le MEME
-        // UPDATE atomique, a l'absence de verrouillage actif AU MOMENT REEL de l'ecriture
-        // (et non au moment du SELECT ci-dessus, qui peut etre perime sous concurrence -
-        // voir AuthAccountRepository.resetFailedAttemptsIfNotLocked). 0 ligne affectee =
-        // le compte etait verrouille au moment de l'ecriture -> meme reponse generique
-        // qu'un mot de passe incorrect (jamais AccountLockedException/423 ici).
-        int reset = authAccountRepository.resetFailedAttemptsIfNotLocked(account.getId(), now);
-        if (reset == 0) {
-            throw new InvalidCredentialsException("Mot de passe incorrect");
-        }
-
-        switch (account.getStatus()) {
-            case LOCKED -> throw new AccountLockedException("Compte verrouille");
-            case DISABLED -> throw new AccountDisabledException("Compte desactive");
-            case ACTIVE -> {
-                // Authentification acceptee.
+            switch (account.getStatus()) {
+                case LOCKED -> throw new AccountLockedException("Compte verrouille");
+                case DISABLED -> throw new AccountDisabledException("Compte desactive");
+                case ACTIVE -> {
+                    // Authentification acceptee.
+                }
             }
+
+            // AuthAccount.roles et Role.permissions sont LAZY : la session Hibernate se
+            // termine avec cette methode transactionnelle, alors que toUserContext(...) est
+            // appelee plus tard par l'appelant (ex. AuthController), hors de toute session.
+            // On force donc ici l'initialisation des deux niveaux de collection pendant que
+            // la session est encore ouverte, sans changer le mapping (toujours LAZY) ni la
+            // frontiere transactionnelle (qui reste dans ce service, pas dans le controleur).
+            initializeRolesAndPermissions(account);
+
+            return account;
         }
 
-        // AuthAccount.roles et Role.permissions sont LAZY : la session Hibernate se
-        // termine avec cette methode transactionnelle, alors que toUserContext(...) est
-        // appelee plus tard par l'appelant (ex. AuthController), hors de toute session.
-        // On force donc ici l'initialisation des deux niveaux de collection pendant que
-        // la session est encore ouverte, sans changer le mapping (toujours LAZY) ni la
-        // frontiere transactionnelle (qui reste dans ce service, pas dans le controleur).
-        //
-        // Note deliberee : les @Modifying ci-dessus n'utilisent PAS clearAutomatically -
-        // cela detacherait "account" du contexte de persistance et casserait precisement
-        // cette initialisation LAZY juste en dessous (LazyInitializationException). Comme
-        // aucun code de cette methode ne relit failedAttempts/lastFailedLoginAt/lockedUntil
-        // sur l'instance "account" apres les UPDATE (leur etat en memoire peut donc etre
-        // perime sans consequence), l'absence de clearAutomatically est sans risque ici.
-        initializeRolesAndPermissions(account);
-
-        return account;
+        // Mot de passe incorrect : enregistrement du ralentissement delegue a un UNIQUE
+        // UPDATE atomique et conditionnel cote base (voir
+        // AuthAccountRepository.registerFailedAttempt) - aucune lecture Java intermediaire
+        // du compteur, donc aucun lost update possible sous concurrence (deux executions
+        // concurrentes sur le meme compte sont serialisees par le verrou de ligne pris par
+        // l'UPDATE lui-meme). Le WHERE de cette requete exclut deja les tentatives arrivant
+        // pendant un delai actif (aucune prolongation) : la valeur de retour n'a pas besoin
+        // d'etre interpretee ici, la reponse est identique dans tous les cas (generique).
+        Instant now = clock.instant();
+        authAccountRepository.registerFailedAttempt(account.getId(), now, now.minus(failureWindow),
+                now.plus(DELAY_AT_THREE_FAILURES), now.plus(DELAY_AT_FOUR_FAILURES),
+                now.plus(DELAY_AT_FIVE_FAILURES), now.plus(DELAY_AT_SIX_OR_MORE_FAILURES));
+        throw new InvalidCredentialsException("Mot de passe incorrect");
     }
 
     private static void initializeRolesAndPermissions(AuthAccount account) {

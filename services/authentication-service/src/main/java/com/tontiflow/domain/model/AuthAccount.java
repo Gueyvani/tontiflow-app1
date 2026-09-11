@@ -82,16 +82,20 @@ public class AuthAccount {
     private Instant lastFailedLoginAt;
 
     /**
-     * Verrouillage temporisé et auto-expirant, déclenché automatiquement
-     * après trop d'échecs. {@code null} = aucun verrouillage automatique
-     * actif. À ne jamais confondre avec {@link AccountStatus#LOCKED}
-     * (verrouillage manuel/administratif, HTTP 423) : ce champ conditionne
-     * un rejet volontairement indiscernable d'un mot de passe incorrect
-     * (HTTP 401 générique), afin de préserver l'anti-énumération déjà en
-     * place dans {@code AuthAccountService}.
+     * Ralentissement progressif (décision R21-D.5, remplace le verrouillage
+     * dur de R21-D.3 — corrige le risque de déni de service par verrouillage,
+     * constat D4-01/R21-D.4) : horodatage avant lequel une <b>nouvelle
+     * tentative avec mauvais mot de passe</b> n'est pas comptabilisée
+     * ({@code null} ou passé = aucun ralentissement actif). Colonne physique
+     * inchangée ({@code locked_until}, aucune migration) — seule la
+     * sémantique change : ce champ ne bloque <b>jamais</b> une authentification
+     * avec le <b>bon</b> mot de passe (voir {@code AuthAccountService.authenticate},
+     * qui l'accepte toujours immédiatement, quel que soit ce champ). À ne
+     * jamais confondre avec {@link AccountStatus#LOCKED} (verrouillage
+     * manuel/administratif, HTTP 423, inchangé).
      */
     @Column(name = "locked_until")
-    private Instant lockedUntil;
+    private Instant nextAttemptAllowedAt;
 
     public AuthAccount() {
     }
@@ -152,11 +156,11 @@ public class AuthAccount {
         this.lastFailedLoginAt = lastFailedLoginAt;
     }
 
-    public Instant getLockedUntil() {
-        return lockedUntil;
+    public Instant getNextAttemptAllowedAt() {
+        return nextAttemptAllowedAt;
     }
 
-    public void setLockedUntil(Instant lockedUntil) {
-        this.lockedUntil = lockedUntil;
+    public void setNextAttemptAllowedAt(Instant nextAttemptAllowedAt) {
+        this.nextAttemptAllowedAt = nextAttemptAllowedAt;
     }
 }

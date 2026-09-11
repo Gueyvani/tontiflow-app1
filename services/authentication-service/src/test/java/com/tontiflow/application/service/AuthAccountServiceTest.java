@@ -35,7 +35,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -66,18 +66,11 @@ class AuthAccountServiceTest {
 
     @BeforeEach
     void setUp() {
-        authAccountService = newService(Clock.fixed(FIXED_NOW, ZoneOffset.UTC), 5, "15m", "15m");
-        // Par defaut "non verrouille" (1 ligne affectee) pour les tests qui atteignent le
-        // mot de passe correct sans se soucier du mecanisme de verrouillage lui-meme -
-        // verifie explicitement, avec des valeurs de retour dediees, dans les tests
-        // "Decision R21-D.3" ci-dessous. lenient() : les tests qui n'exercent jamais ce
-        // chemin (createAccount, assignRole, ...) ne stubbent pas cet appel.
-        lenient().when(authAccountRepository.resetFailedAttemptsIfNotLocked(any(), any())).thenReturn(1);
+        authAccountService = newService(Clock.fixed(FIXED_NOW, ZoneOffset.UTC), "15m");
     }
 
-    private AuthAccountService newService(Clock clock, int maxFailedAttempts, String failureWindow, String lockDuration) {
-        return new AuthAccountService(authAccountRepository, roleRepository, passwordEncoder, clock,
-                maxFailedAttempts, failureWindow, lockDuration);
+    private AuthAccountService newService(Clock clock, String failureWindow) {
+        return new AuthAccountService(authAccountRepository, roleRepository, passwordEncoder, clock, failureWindow);
     }
 
     @Test
@@ -156,24 +149,22 @@ class AuthAccountServiceTest {
     }
 
     // ------------------------------------------------------------------
-    // Décision R21-D.3 : verrouillage temporisé de compte, indépendant du
-    // verrouillage manuel (AccountStatus.LOCKED) ci-dessus.
-    //
-    // Correction P1 (audit concurrence, cf. AuthAccountRepository) : le
-    // comptage / la fenêtre / le seuil sont désormais calculés par un UNIQUE
-    // UPDATE atomique et conditionnel côté base
-    // (registerFailedAttempt / resetFailedAttemptsIfNotLocked), donc non
-    // reproductibles avec un repository simulé (Mockito ne peut pas exécuter
-    // de SQL). Ces tests unitaires vérifient uniquement la DÉLÉGATION
-    // correcte (arguments transmis, branchement sur le résultat renvoyé) ;
-    // l'arithmétique elle-même (fenêtre, seuil, non-prolongation pendant un
-    // verrou actif) est prouvée par de vraies requêtes SQL dans
+    // Décision R21-D.5 : ralentissement progressif, remplace le verrouillage
+    // dur de R21-D.3 (corrige le déni de service par verrouillage, constat
+    // D4-01/R21-D.4). Le comptage / la fenêtre / la table de délai sont
+    // calculés par un UNIQUE UPDATE atomique et conditionnel côté base
+    // (registerFailedAttempt), donc non reproductibles avec un repository
+    // simulé (Mockito ne peut pas exécuter de SQL). Ces tests unitaires
+    // vérifient uniquement la DÉLÉGATION correcte (arguments transmis) et la
+    // RÈGLE CRITIQUE (mot de passe correct toujours accepté, sans condition,
+    // sans jamais consulter le ralentissement). L'arithmétique de la table de
+    // délai elle-même est prouvée par de vraies requêtes SQL dans
     // AuthAccountRepositoryTest (H2 réel, séquentiel) et par
     // AccountLockoutConcurrencyIntegrationTest (H2 réel, accès concurrent).
     // ------------------------------------------------------------------
 
     @Test
-    void authenticate_withWrongPassword_delegatesToRegisterFailedAttempt_withComputedWindowAndLockBounds() {
+    void authenticate_withWrongPassword_delegatesToRegisterFailedAttempt_withComputedWindowAndDelayBounds() {
         AuthAccount account = activeAccount("lockout1@tontiflow.test", TEST_PASSWORD);
         when(authAccountRepository.findByEmail("lockout1@tontiflow.test")).thenReturn(Optional.of(account));
 
@@ -181,37 +172,38 @@ class AuthAccountServiceTest {
                 .isInstanceOf(InvalidCredentialsException.class);
 
         // Verifie que le service calcule et transmet exactement les bornes attendues a
-        // l'UPDATE atomique : fenetre glissante de 15 min, seuil 5, echeance de
-        // verrouillage a 15 min - sans jamais lire/ecrire ces champs lui-meme en Java.
+        // l'UPDATE atomique : fenetre glissante de 15 min, et les 4 echeances fixes de la
+        // table de delai (2s/5s/10s/30s) - sans jamais lire/ecrire ces champs lui-meme en Java.
         verify(authAccountRepository).registerFailedAttempt(
-                account.getId(), FIXED_NOW, FIXED_NOW.minus(Duration.ofMinutes(15)), 5, FIXED_NOW.plus(Duration.ofMinutes(15)));
+                account.getId(), FIXED_NOW, FIXED_NOW.minus(Duration.ofMinutes(15)),
+                FIXED_NOW.plusSeconds(2), FIXED_NOW.plusSeconds(5), FIXED_NOW.plusSeconds(10), FIXED_NOW.plusSeconds(30));
     }
 
     @Test
-    void authenticate_correctPasswordButResetReturnsZero_deniesWithGenericException_notAccountLockedException() {
-        // Simule un compte actuellement sous verrouillage temporise : l'UPDATE atomique
-        // n'affecte aucune ligne (WHERE non satisfaite cote base). La reponse doit rester
-        // IDENTIQUE a un mot de passe incorrect - jamais AccountLockedException/423
-        // (anti-enumeration, decision R21-D.3).
+    void authenticate_withCorrectPassword_alwaysSucceeds_regardlessOfPriorFailedAttempts_delegatesResetAtomically() {
+        // REGLE CRITIQUE R21-D.5 (preuve directe de la correction D4-01) : meme un compte
+        // "profondement" dans le ralentissement (10 echecs prealables simules en memoire,
+        // valeur jamais relue ni interrogee par authenticate()) voit son bon mot de passe
+        // accepte IMMEDIATEMENT - aucun appel au repository pour verifier/consulter un
+        // quelconque etat de ralentissement sur le chemin succes.
+        //
+        // Correction concurrence (verification post-implementation) : la remise a zero est
+        // deleguee a AuthAccountRepository.resetFailedAttempts (UPDATE atomique et
+        // scoping-minimal cote base), plus a une mutation de l'entite geree - avec un
+        // repository simule, on verifie donc la DELEGATION (l'appel a eu lieu avec le bon
+        // identifiant), pas un effet de bord sur l'objet Java (qui reste volontairement
+        // perime en memoire apres l'appel, sans consequence - voir authenticate()).
         AuthAccount account = activeAccount("lockout2@tontiflow.test", TEST_PASSWORD);
+        account.setFailedAttempts(10);
+        account.setNextAttemptAllowedAt(FIXED_NOW.plusSeconds(29)); // ralentissement encore actif
         when(authAccountRepository.findByEmail("lockout2@tontiflow.test")).thenReturn(Optional.of(account));
-        when(authAccountRepository.resetFailedAttemptsIfNotLocked(any(), any())).thenReturn(0);
 
-        assertThatThrownBy(() -> authAccountService.authenticate("lockout2@tontiflow.test", TEST_PASSWORD))
-                .isInstanceOf(InvalidCredentialsException.class)
-                .isNotInstanceOf(AccountLockedException.class);
-    }
-
-    @Test
-    void authenticate_correctPasswordAndResetSucceeds_delegatesWithCurrentTime_andProceeds() {
-        AuthAccount account = activeAccount("lockout3@tontiflow.test", TEST_PASSWORD);
-        when(authAccountRepository.findByEmail("lockout3@tontiflow.test")).thenReturn(Optional.of(account));
-        when(authAccountRepository.resetFailedAttemptsIfNotLocked(account.getId(), FIXED_NOW)).thenReturn(1);
-
-        AuthAccount result = authAccountService.authenticate("lockout3@tontiflow.test", TEST_PASSWORD);
+        AuthAccount result = authAccountService.authenticate("lockout2@tontiflow.test", TEST_PASSWORD);
 
         assertThat(result).isSameAs(account);
-        verify(authAccountRepository).resetFailedAttemptsIfNotLocked(account.getId(), FIXED_NOW);
+        verify(authAccountRepository).resetFailedAttempts(account.getId());
+        // registerFailedAttempt (chemin echec) n'est jamais appele sur le chemin succes.
+        verify(authAccountRepository, never()).registerFailedAttempt(any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test

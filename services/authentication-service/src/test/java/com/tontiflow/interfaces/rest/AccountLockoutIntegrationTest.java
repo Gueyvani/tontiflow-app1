@@ -16,21 +16,26 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.ActiveProfiles;
 
+import java.time.Instant;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Prouve, au niveau HTTP, le verrouillage temporisé de compte (décision
- * R21-D.3) déclenché par {@code AuthAccountService.authenticate}.
+ * Prouve, au niveau HTTP, le ralentissement progressif de compte (décision
+ * R21-D.5, remplace le verrouillage dur de R21-D.3 — corrige le risque de
+ * déni de service par verrouillage, constat D4-01/R21-D.4) déclenché par
+ * {@code AuthAccountService.authenticate}.
  *
- * <p>Seuil volontairement bas ({@code account-lockout.max-failed-attempts=3})
- * via {@code @SpringBootTest properties} — l'expiration du verrouillage
- * (fenêtre/durée en minutes) n'est, elle, pas testable à ce niveau sans
- * horloge ajustable ; elle est couverte de façon déterministe par
- * {@code AuthAccountServiceTest} (horloge fixe injectée).</p>
+ * <p>Seuils réels (pas de {@code @SpringBootTest properties} : la table de
+ * délai est fixe et non configurable, décision R21-D.5). L'expiration réelle
+ * d'un délai (2 à 30 s) n'est pas testée ici par une attente (lenteur/fragilité
+ * inutiles) : elle est couverte de façon déterministe par
+ * {@code AuthAccountRepositoryTest} (horodatages calculés, pas d'attente
+ * réelle). Ce test se concentre sur la preuve décisive de la correction D4-01 :
+ * un mot de passe correct réussit <b>immédiatement</b>, sans attendre quoi que
+ * ce soit, même juste après de nombreux échecs.</p>
  */
-@SpringBootTest(
-        webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-        properties = {"account-lockout.max-failed-attempts=3"})
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("test")
 @Import(JwtTestSecurityConfiguration.class)
 class AccountLockoutIntegrationTest {
@@ -45,40 +50,53 @@ class AccountLockoutIntegrationTest {
     private AuthAccountRepository authAccountRepository;
 
     @Test
-    void login_after3FailedAttempts_locksAccountTemporarily_indiscernableFromWrongPassword() {
+    void login_after6RapidFailedAttempts_correctPasswordStillSucceedsImmediately_provingNoAccountLockoutDos() {
         String email = "lockout-http@tontiflow.test";
         register(email, TEST_PASSWORD);
 
-        // 3 echecs : sous le seuil, chacun un simple "mauvais mot de passe" (401).
-        for (int i = 0; i < 3; i++) {
+        // 6 requetes HTTP envoyees SANS attente entre elles : chacune recoit un simple
+        // "mauvais mot de passe" (401), jamais autre chose - y compris celles arrivant
+        // pendant le delai de 2s active par la 3e (le guard atomique cote base les rend
+        // no-op sans jamais changer la reponse HTTP, cf. AuthAccountRepository).
+        for (int i = 0; i < 6; i++) {
             ResponseEntity<ErrorResponse> attempt = loginExpectingError(email, WRONG_PASSWORD);
             assertThat(attempt.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
         }
 
-        // Preuve directe que le verrouillage est bien PERSISTE entre les requetes HTTP
-        // (chacune sa propre transaction) - pas seulement observe via le code HTTP.
-        AuthAccount persisted = authAccountRepository.findByEmail(email).orElseThrow();
-        assertThat(persisted.getFailedAttempts()).isEqualTo(3);
-        assertThat(persisted.getLockedUntil()).isNotNull();
+        // Preuve que le ralentissement est bien PERSISTE entre les requetes HTTP (chacune
+        // sa propre transaction) - pas seulement observe via le code HTTP. Seules les 3
+        // premieres requetes sont reellement comptabilisees : des la 3e, le delai de 2s
+        // s'active (table R21-D.5) et les requetes 4 a 6, envoyees en quelques
+        // millisecondes (bien avant l'expiration de ce delai), sont des no-op legitimes -
+        // le compteur ne peut donc PAS depasser 3 dans ce scenario "rafale sans attente".
+        // C'est le guard fonctionnant exactement comme concu, pas une anomalie.
+        AuthAccount beforeSuccess = authAccountRepository.findByEmail(email).orElseThrow();
+        assertThat(beforeSuccess.getFailedAttempts()).isEqualTo(3);
+        assertThat(beforeSuccess.getNextAttemptAllowedAt()).isAfter(Instant.now()); // delai actif (2s)
 
-        // 4e tentative, MEME AVEC LE BON MOT DE PASSE : le compte est desormais
-        // temporairement verrouille. La reponse doit rester un 401 generique,
-        // JAMAIS un 423 (reserve au verrouillage manuel/admin) - anti-enumeration
-        // (decision R21-D.3).
-        ResponseEntity<ErrorResponse> locked = loginExpectingError(email, TEST_PASSWORD);
+        // 7e tentative, IMMEDIATEMENT, AVEC LE BON MOT DE PASSE : doit reussir SANS
+        // attendre, malgre le delai encore actif - c'est la preuve directe que le deni de
+        // service par verrouillage (D4-01, R21-D.4) est corrige : personne ne peut
+        // empecher le titulaire legitime de se connecter en multipliant les mauvais mots
+        // de passe.
+        ResponseEntity<TokenResponse> success = login(email, TEST_PASSWORD);
 
-        assertThat(locked.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
-        assertThat(locked.getStatusCode()).isNotEqualTo(HttpStatus.LOCKED);
-        assertThat(locked.getBody()).isNotNull();
-        assertThat(locked.getBody().detail()).isEqualTo("Invalid credentials");
+        assertThat(success.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(success.getBody()).isNotNull();
+        assertThat(success.getBody().accessToken()).isNotBlank();
+
+        // Le ralentissement est bien remis a zero apres le succes.
+        AuthAccount afterSuccess = authAccountRepository.findByEmail(email).orElseThrow();
+        assertThat(afterSuccess.getFailedAttempts()).isZero();
+        assertThat(afterSuccess.getNextAttemptAllowedAt()).isNull();
     }
 
     @Test
-    void login_withFewerThanThresholdFailedAttempts_correctPasswordStillSucceeds() {
+    void login_withFewFailedAttempts_correctPasswordStillSucceeds() {
         String email = "lockout-http-ok@tontiflow.test";
         register(email, TEST_PASSWORD);
 
-        // 2 echecs : reste sous le seuil (3).
+        // 2 echecs : palier "aucun delai" (1-2 echecs -> 0s).
         loginExpectingError(email, WRONG_PASSWORD);
         loginExpectingError(email, WRONG_PASSWORD);
 
@@ -87,6 +105,27 @@ class AccountLockoutIntegrationTest {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody()).isNotNull();
         assertThat(response.getBody().accessToken()).isNotBlank();
+    }
+
+    @Test
+    void login_wrongPasswordDuringActiveDelay_remainsGenericUnauthorized_indiscernableFromOrdinaryFailure() {
+        String email = "lockout-http-paced@tontiflow.test";
+        register(email, TEST_PASSWORD);
+
+        // 3 echecs : franchit le premier palier avec delai (2s).
+        for (int i = 0; i < 3; i++) {
+            loginExpectingError(email, WRONG_PASSWORD);
+        }
+
+        // Nouvelle tentative IMMEDIATE (delai de 2s pas encore ecoule), toujours avec un
+        // mauvais mot de passe : doit rester un 401 generique, identique a un echec
+        // ordinaire - aucun signal distinct pour un delai en cours (anti-enumeration,
+        // decision R21-D.5, meme principe que R21-D.3).
+        ResponseEntity<ErrorResponse> paced = loginExpectingError(email, WRONG_PASSWORD);
+
+        assertThat(paced.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(paced.getBody()).isNotNull();
+        assertThat(paced.getBody().detail()).isEqualTo("Invalid credentials");
     }
 
     private ResponseEntity<Void> register(String email, String password) {

@@ -29,8 +29,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Test de concurrence RÉELLE (vrais threads, vraie transaction Spring par
- * thread, H2 réel) du verrouillage temporisé de compte (décision R21-D.3 ;
- * correction P1, atomicité) — même patron/limite documentée que
+ * thread, H2 réel) du ralentissement progressif de compte (décision R21-D.5,
+ * remplace le verrouillage dur de R21-D.3 — corrige le déni de service par
+ * verrouillage, constat D4-01/R21-D.4) — même patron/limite documentée que
  * {@code ContributionConcurrencyIntegrationTest} (financial-service),
  * {@code LedgerConcurrencyIntegrationTest}, {@code RoundConcurrencyIntegrationTest}
  * (tontine-service).
@@ -40,11 +41,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * — aucun Testcontainers/PostgreSQL n'existe nulle part dans ce dépôt pour ce
  * type de scénario, H2-avec-vrais-threads étant le patron déjà établi. Il
  * prouve donc l'atomicité de {@link AuthAccountRepository#registerFailedAttempt}
- * / {@link AuthAccountRepository#resetFailedAttemptsIfNotLocked} sous ce
- * moteur — pas littéralement sous PostgreSQL. Le mécanisme (verrou de ligne
- * pris par un {@code UPDATE} unique, sans lecture Java intermédiaire) repose
- * sur une garantie standard partagée par les deux moteurs sous READ COMMITTED,
- * mais ceci reste une inférence, non une preuve directe contre PostgreSQL.</p>
+ * sous ce moteur — pas littéralement sous PostgreSQL. Le mécanisme (verrou de
+ * ligne pris par un {@code UPDATE} unique, sans lecture Java intermédiaire)
+ * repose sur une garantie standard partagée par les deux moteurs sous READ
+ * COMMITTED, mais ceci reste une inférence, non une preuve directe contre
+ * PostgreSQL.</p>
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 @ActiveProfiles("test")
@@ -61,14 +62,16 @@ class AccountLockoutConcurrencyIntegrationTest {
     private AuthAccountRepository authAccountRepository;
 
     // SCÉNARIO 1 — incréments concurrents : 10 threads, mauvais mot de passe, compte propre
-    // (failed_attempts=0, locked_until=null). Seuil par defaut = 5
-    // (application-test.yml/application.yml, non surchargé ici). Avec un UPDATE atomique
-    // (chaque exécution concurrente sérialisée par le verrou de ligne pris par l'UPDATE
-    // lui-même), le compteur final doit être EXACTEMENT 5 : ni moins (preuve de l'absence
-    // de lost update — c'était le bug corrigé), ni plus (preuve que le WHERE guard stoppe
-    // bien les incréments une fois verrouillé).
+    // (failed_attempts=0, aucun delai). Avec un UPDATE atomique (chaque exécution
+    // concurrente sérialisée par le verrou de ligne pris par l'UPDATE lui-même), les
+    // tentatives s'enregistrent en séquence stricte 1,2,3 - à la 3e, un délai de 2s
+    // s'active (table de délai R21-D.5) et TOUTES les tentatives suivantes, arrivant en
+    // quelques millisecondes (donc bien avant l'expiration de ce délai), deviennent des
+    // no-op (WHERE guard). Le compteur final doit être EXACTEMENT 3 : ni moins (preuve de
+    // l'absence de lost update — c'était le bug corrigé en R21-D.3), ni plus (preuve que
+    // le guard stoppe bien les incréments une fois le délai actif).
     @Test
-    void authenticate_tenConcurrentWrongPasswordAttempts_noLostUpdate_locksExactlyAtThreshold() throws Exception {
+    void authenticate_tenConcurrentWrongPasswordAttempts_noLostUpdate_stopsExactlyWhenDelayActivates() throws Exception {
         String email = "concurrency1@tontiflow.test";
         authAccountService.createAccount(email, TEST_PASSWORD);
         UUID accountId = authAccountRepository.findByEmail(email).orElseThrow().getId();
@@ -76,20 +79,20 @@ class AccountLockoutConcurrencyIntegrationTest {
         runConcurrentWrongPasswordAttempts(email, 10);
 
         AuthAccount reloaded = authAccountRepository.findById(accountId).orElseThrow();
-        assertThat(reloaded.getFailedAttempts()).isEqualTo(5);
-        assertThat(reloaded.getLockedUntil()).isNotNull();
+        assertThat(reloaded.getFailedAttempts()).isEqualTo(3);
+        assertThat(reloaded.getNextAttemptAllowedAt()).isAfter(Instant.now());
     }
 
-    // SCÉNARIO 2 — seuil : compte préparé à failed_attempts=4, 4 tentatives concurrentes
-    // avec mauvais mot de passe. Au moins une doit franchir le seuil ; le WHERE guard
-    // garantit qu'aucune ne peut dépasser durablement au-delà (verrouillage déclenché puis
-    // les suivantes deviennent des no-op).
+    // SCÉNARIO 2 — palier : compte préparé à failed_attempts=2 (juste avant le premier
+    // palier avec délai), 4 tentatives concurrentes avec mauvais mot de passe. La première
+    // à committer atteint 3 échecs et active le délai de 2s ; le WHERE guard garantit que
+    // les suivantes, concurrentes, deviennent des no-op.
     @Test
-    void authenticate_concurrentAttemptsFromFourFailures_reachesThresholdAndLocks() throws Exception {
+    void authenticate_concurrentAttemptsFromTwoFailures_activatesDelayExactlyOnce() throws Exception {
         String email = "concurrency2@tontiflow.test";
         authAccountService.createAccount(email, TEST_PASSWORD);
         AuthAccount account = authAccountRepository.findByEmail(email).orElseThrow();
-        account.setFailedAttempts(4);
+        account.setFailedAttempts(2);
         account.setLastFailedLoginAt(Instant.now().truncatedTo(ChronoUnit.MILLIS));
         authAccountRepository.save(account);
         UUID accountId = account.getId();
@@ -97,47 +100,52 @@ class AccountLockoutConcurrencyIntegrationTest {
         runConcurrentWrongPasswordAttempts(email, 4);
 
         AuthAccount reloaded = authAccountRepository.findById(accountId).orElseThrow();
-        assertThat(reloaded.getFailedAttempts()).isGreaterThanOrEqualTo(5);
-        assertThat(reloaded.getLockedUntil()).isNotNull();
+        assertThat(reloaded.getFailedAttempts()).isEqualTo(3);
+        assertThat(reloaded.getNextAttemptAllowedAt()).isAfter(Instant.now());
     }
 
-    // SCÉNARIO 3 — verrou actif : compte déjà verrouillé (failed_attempts=5, locked_until
-    // dans le futur), 8 tentatives concurrentes avec mauvais mot de passe. Toutes doivent
-    // être refusées (InvalidCredentialsException), et — c'est le point testé ici —
-    // failed_attempts et locked_until doivent rester STRICTEMENT inchangés : le WHERE
-    // guard de registerFailedAttempt exclut toute ligne déjà verrouillée, donc aucun
-    // incrément ni prolongation, même sous accès concurrent massif.
+    // SCÉNARIO 3 — délai actif : compte déjà dans une fenêtre de ralentissement
+    // (failed_attempts=6, nextAttemptAllowedAt dans le futur, palier plafond 30s), 8
+    // tentatives concurrentes avec mauvais mot de passe. Toutes doivent être refusées
+    // (InvalidCredentialsException, 401 générique), et — c'est le point testé ici —
+    // failed_attempts et nextAttemptAllowedAt doivent rester STRICTEMENT inchangés : le
+    // WHERE guard de registerFailedAttempt exclut toute ligne dont le délai est encore
+    // actif, donc aucun incrément ni prolongation, même sous accès concurrent massif.
     @Test
-    void authenticate_concurrentAttemptsWhileLocked_neverExtendLock_neverIncrementCounter() throws Exception {
+    void authenticate_concurrentAttemptsWhileDelayActive_neverExtendDelay_neverIncrementCounter() throws Exception {
         String email = "concurrency3@tontiflow.test";
         authAccountService.createAccount(email, TEST_PASSWORD);
         AuthAccount account = authAccountRepository.findByEmail(email).orElseThrow();
-        Instant lockedUntil = Instant.now().truncatedTo(ChronoUnit.MILLIS).plus(Duration.ofMinutes(10));
-        account.setFailedAttempts(5);
-        account.setLockedUntil(lockedUntil);
+        Instant nextAttemptAllowedAt = Instant.now().truncatedTo(ChronoUnit.MILLIS).plus(Duration.ofSeconds(30));
+        account.setFailedAttempts(6);
+        account.setNextAttemptAllowedAt(nextAttemptAllowedAt);
         authAccountRepository.save(account);
         UUID accountId = account.getId();
 
         runConcurrentWrongPasswordAttempts(email, 8);
 
         AuthAccount reloaded = authAccountRepository.findById(accountId).orElseThrow();
-        assertThat(reloaded.getFailedAttempts()).isEqualTo(5);
-        assertThat(reloaded.getLockedUntil()).isEqualTo(lockedUntil);
+        assertThat(reloaded.getFailedAttempts()).isEqualTo(6);
+        assertThat(reloaded.getNextAttemptAllowedAt()).isEqualTo(nextAttemptAllowedAt);
     }
 
-    // SCÉNARIO 4 — succès concurrent avec échec : 1 tentative avec le BON mot de passe et
-    // 3 avec un mauvais, en parallèle, sur un compte propre. Avec seulement 3 échecs
-    // possibles (< seuil de 5), le compte ne peut JAMAIS se retrouver verrouillé dans ce
-    // scénario, quel que soit l'ordre de commit : la tentative correcte doit donc TOUJOURS
-    // réussir (garantie forte, déterministe). Ce qui reste non déterministe (par
-    // construction, selon l'ordre réel de commit des UPDATE) est la valeur finale de
-    // failed_attempts, qui doit rester dans l'intervalle [0, 3] - jamais en dehors, ce qui
-    // prouverait un état "déchiré" (torn) plutôt qu'une simple sérialisation valide.
+    // SCÉNARIO 4 — succès concurrent avec échec, PREUVE DÉCISIVE de la correction D4-01
+    // sous concurrence réelle : le compte est préparé PROFONDÉMENT dans un délai actif
+    // (failed_attempts=10, nextAttemptAllowedAt à +30s, le palier plafond) - le pire cas
+    // possible pour l'ancien mécanisme (verrouillage dur, R21-D.3). 1 thread avec le BON
+    // mot de passe est lancé en parallèle de 3 threads avec un mauvais mot de passe.
+    // Contrairement à R21-D.3, le succès n'a AUCUNE condition (voir
+    // AuthAccountService.authenticate) : il doit donc réussir à 100% des exécutions, quel
+    // que soit l'ordre de commit réel des threads concurrents.
     @Test
-    void authenticate_concurrentSuccessAndFailure_successAlwaysWins_neverProducesTornState() throws Exception {
+    void authenticate_concurrentSuccessDeepInActiveDelay_successAlwaysWinsImmediately() throws Exception {
         String email = "concurrency4@tontiflow.test";
         authAccountService.createAccount(email, TEST_PASSWORD);
-        UUID accountId = authAccountRepository.findByEmail(email).orElseThrow().getId();
+        AuthAccount account = authAccountRepository.findByEmail(email).orElseThrow();
+        account.setFailedAttempts(10);
+        account.setNextAttemptAllowedAt(Instant.now().truncatedTo(ChronoUnit.MILLIS).plus(Duration.ofSeconds(30)));
+        authAccountRepository.save(account);
+        UUID accountId = account.getId();
 
         int failureThreads = 3;
         int totalThreads = failureThreads + 1;
@@ -145,7 +153,7 @@ class AccountLockoutConcurrencyIntegrationTest {
         CountDownLatch readyLatch = new CountDownLatch(totalThreads);
         CountDownLatch startLatch = new CountDownLatch(1);
         AtomicInteger successCount = new AtomicInteger();
-        AtomicInteger unexpectedCount = new AtomicInteger();
+        AtomicInteger unexpectedDenialCount = new AtomicInteger();
 
         List<Callable<Void>> tasks = new ArrayList<>();
         tasks.add(() -> {
@@ -155,7 +163,7 @@ class AccountLockoutConcurrencyIntegrationTest {
                 authAccountService.authenticate(email, TEST_PASSWORD);
                 successCount.incrementAndGet();
             } catch (InvalidCredentialsException e) {
-                unexpectedCount.incrementAndGet();
+                unexpectedDenialCount.incrementAndGet();
             }
             return null;
         });
@@ -180,16 +188,16 @@ class AccountLockoutConcurrencyIntegrationTest {
         }
         executor.shutdown();
 
-        // Garantie forte et deterministe : avec seulement 3 echecs possibles (< seuil 5),
-        // le compte ne peut jamais etre verrouille dans ce scenario -> le bon mot de passe
-        // reussit TOUJOURS, quel que soit l'ordre de commit.
+        // Garantie forte et deterministe (contrairement a R21-D.3) : le succes n'a AUCUNE
+        // condition, il gagne donc TOUJOURS, meme profondement dans un delai actif.
         assertThat(successCount.get()).isEqualTo(1);
-        assertThat(unexpectedCount.get()).isEqualTo(0);
+        assertThat(unexpectedDenialCount.get()).isEqualTo(0);
 
+        // Non deterministe par construction (ordre de commit reel des echecs concurrents,
+        // avant ou apres le succes) mais borne : jamais negatif, jamais au-dela du nombre
+        // d'echecs possibles - preuve d'absence d'etat "deteriore" (torn), meme si le
+        // succes n'a pas ete le tout dernier a committer.
         AuthAccount reloaded = authAccountRepository.findById(accountId).orElseThrow();
-        assertThat(reloaded.getLockedUntil()).isNull();
-        // Non deterministe par construction (ordre de commit reel) mais borne : jamais
-        // negatif, jamais > le nombre d'echecs possibles - preuve d'absence d'etat dechire.
         assertThat(reloaded.getFailedAttempts()).isBetween(0, failureThreads);
     }
 
@@ -212,7 +220,7 @@ class AccountLockoutConcurrencyIntegrationTest {
                         authAccountService.authenticate(email, WRONG_PASSWORD);
                         throw new AssertionError("authenticate() aurait du lever InvalidCredentialsException");
                     } catch (InvalidCredentialsException expected) {
-                        // attendu : mauvais mot de passe (ou verrouillage automatique - meme exception).
+                        // attendu : mauvais mot de passe (ou delai en cours - meme exception).
                     }
                     return null;
                 })
