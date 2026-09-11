@@ -49,6 +49,19 @@ claim-ip-rate-limit:
   ip-per-minute: ${CLAIM_IP_RATE_LIMIT_IP_PER_MINUTE:10}
   trusted-proxy-count: ${CLAIM_IP_RATE_LIMIT_TRUSTED_PROXY_COUNT:0}
 
+# Rate limiting IP local (in-JVM) de POST /api/v1/auth/login (decision R21-D.1,
+# option 3 phase 3a). Ferme le vecteur de force brute / credential-stuffing
+# mono-source sur le login (constat N1, R21-C.A3.3) : cet endpoint est public
+# et n'etait rate-limite nulle part. La protection PAR COMPTE (verrouillage
+# temporise) est prevue pour une phase ulterieure (R21-D.3). Fenetre glissante
+# d'une minute, NON distribue (compteurs par instance, remis a zero au
+# redemarrage). Meme semantique trusted-proxy-count que claim-ip-rate-limit :
+# 0 = X-Forwarded-For ignore (pair TCP uniquement, defaut sur).
+auth-ip-rate-limit:
+  enabled: ${AUTH_IP_RATE_LIMIT_ENABLED:true}
+  login-per-minute: ${AUTH_IP_RATE_LIMIT_LOGIN_PER_MINUTE:5}
+  trusted-proxy-count: ${AUTH_IP_RATE_LIMIT_TRUSTED_PROXY_COUNT:0}
+
 # Actuator limite au strict necessaire pour permettre une sonde de sante sans
 # JWT (orchestration - Docker/K8s) sans exposer d'informations sensibles
 # (decision R11, corrections techniques - meme pattern deja etabli par
