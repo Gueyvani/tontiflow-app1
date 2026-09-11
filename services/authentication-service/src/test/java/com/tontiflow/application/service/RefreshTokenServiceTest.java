@@ -22,6 +22,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -45,11 +46,14 @@ class RefreshTokenServiceTest {
     void setUp() {
         Clock fixedClock = Clock.fixed(FIXED_NOW, ZoneOffset.UTC);
         refreshTokenService = new RefreshTokenService(refreshTokenRepository, fixedClock, "30d");
-        // lenient() : ce stub n'est exerce que par les scenarios qui atteignent vraiment
-        // la persistance (issue, rotate valide) ; les scenarios d'echec (token inconnu/
-        // expire/deja revoque) s'arretent avant, ce qui rendrait le stub "inutile" en mode strict.
+        // lenient() : ces stubs ne sont exerces que par les scenarios qui atteignent
+        // vraiment la persistance (issue, rotate valide) ; les scenarios d'echec (token
+        // inconnu/expire/deja consomme) s'arretent avant, ce qui les rendrait "inutiles"
+        // en mode strict. Par defaut, consumeIfActive "reussit" (1 ligne affectee) - les
+        // tests de reutilisation (decision R21-D.6) le surchargent explicitement a 0.
         lenient().when(refreshTokenRepository.save(any(RefreshToken.class)))
                 .thenAnswer(invocation -> invocation.getArgument(0));
+        lenient().when(refreshTokenRepository.consumeIfActive(any(), any())).thenReturn(1);
     }
 
     @Test
@@ -68,7 +72,7 @@ class RefreshTokenServiceTest {
     }
 
     @Test
-    void rotate_withValidToken_revokesOldAndIssuesNewInSameFamily() {
+    void rotate_withValidToken_consumesOldAtomically_andIssuesNewInSameFamily() {
         UUID accountId = UUID.randomUUID();
         UUID familyId = UUID.randomUUID();
         RefreshToken existing = activeToken(accountId, familyId, "existing-hash", FIXED_NOW.plusSeconds(3600));
@@ -77,7 +81,11 @@ class RefreshTokenServiceTest {
 
         RefreshToken rotated = refreshTokenService.rotate("raw-token-value");
 
-        assertThat(existing.getRevokedAt()).isEqualTo(FIXED_NOW);
+        // Decision R21-D.6 : la consommation n'est plus une mutation de l'entite geree
+        // (existing.getRevokedAt() n'est plus jamais ecrit par le service) mais une
+        // delegation a l'UPDATE atomique - on verifie donc l'appel, pas un effet de bord
+        // sur l'objet Java.
+        verify(refreshTokenRepository).consumeIfActive(existing.getId(), FIXED_NOW);
         assertThat(rotated.getFamilyId()).isEqualTo(familyId);
         assertThat(rotated.getAccountId()).isEqualTo(accountId);
         assertThat(rotated.getRawToken()).isNotBlank();
@@ -103,16 +111,22 @@ class RefreshTokenServiceTest {
     }
 
     @Test
-    void rotate_withAlreadyRevokedToken_throwsReuseDetectedAndRevokesFamily() {
+    void rotate_whenConsumeIfActiveReturnsZero_throwsReuseDetectedAndRevokesFamily_withoutCreatingNewRotation() {
+        // Decision R21-D.6 : la reutilisation n'est plus detectee par lecture d'un etat
+        // "deja revoque" sur l'entite (course possible), mais par le retour 0 lignes
+        // affectees de l'UPDATE atomique consumeIfActive - seul signal desormais consulte.
         UUID familyId = UUID.randomUUID();
-        RefreshToken revoked = activeToken(UUID.randomUUID(), familyId, "revoked-hash", FIXED_NOW.plusSeconds(3600));
-        revoked.setRevokedAt(FIXED_NOW.minusSeconds(60));
-        when(refreshTokenRepository.findByTokenHash(any())).thenReturn(Optional.of(revoked));
+        RefreshToken presented = activeToken(UUID.randomUUID(), familyId, "reused-hash", FIXED_NOW.plusSeconds(3600));
+        when(refreshTokenRepository.findByTokenHash(any())).thenReturn(Optional.of(presented));
+        when(refreshTokenRepository.consumeIfActive(presented.getId(), FIXED_NOW)).thenReturn(0);
 
         assertThatThrownBy(() -> refreshTokenService.rotate("reused-token"))
                 .isInstanceOf(RefreshTokenReuseDetectedException.class);
 
         verify(refreshTokenRepository).revokeFamily(familyId, FIXED_NOW);
+        // Aucune nouvelle rotation ne doit etre creee sur ce chemin : ni sauvegarde d'un
+        // nouveau token, ni emission d'un couple access/refresh valide.
+        verify(refreshTokenRepository, never()).save(any(RefreshToken.class));
     }
 
     // ------------------------------------------------------------------

@@ -65,18 +65,33 @@ public class RefreshTokenService {
     }
 
     /**
-     * Fait tourner un Refresh Token : valide le token présenté, le révoque,
-     * et en émet un nouveau dans la même famille.
+     * Fait tourner un Refresh Token : valide le token présenté, le consomme
+     * atomiquement, et en émet un nouveau dans la même famille.
      *
-     * <p>Si le token présenté est déjà révoqué, ceci est traité comme un
-     * signal de compromission probable : toute la famille est immédiatement
-     * révoquée avant que l'exception ne soit levée.</p>
+     * <p><strong>Correction concurrence (décision R21-D.6, constat
+     * D4-02/R21-D.4)</strong> : la consommation du token présenté est déléguée
+     * à un <b>unique</b> {@code UPDATE} atomique et conditionnel côté base
+     * ({@link RefreshTokenRepository#consumeIfActive}), plutôt qu'à une
+     * lecture (« déjà révoqué ? ») suivie d'une mutation d'entité différée au
+     * commit — cette dernière séquence laissait une fenêtre de course où deux
+     * requêtes concurrentes présentant le <b>même</b> token pouvaient toutes
+     * deux lire {@code revokedAt = null} et toutes deux réussir leur
+     * rotation, produisant deux successeurs valides à partir d'un seul token
+     * (violation de l'usage unique). Aucun nouveau Refresh Token n'est
+     * généré/persisté avant que cette consommation atomique n'ait
+     * explicitement réussi.</p>
+     *
+     * <p>Si la consommation échoue ({@code rowsUpdated == 0} — le token était
+     * déjà révoqué au moment réel de l'écriture, pas au moment de la lecture
+     * antérieure), ceci est traité comme un signal de compromission probable :
+     * toute la famille est immédiatement révoquée avant que l'exception ne
+     * soit levée.</p>
      *
      * @param rawToken token brut présenté par le client
      * @return le nouveau token émis, avec sa valeur brute accessible via {@link RefreshToken#getRawToken()}
      * @throws InvalidRefreshTokenException      si aucun token ne correspond au hash calculé
      * @throws RefreshTokenExpiredException      si le token est expiré
-     * @throws RefreshTokenReuseDetectedException si le token était déjà révoqué (réutilisation détectée)
+     * @throws RefreshTokenReuseDetectedException si le token était déjà consommé/révoqué (réutilisation détectée)
      */
     // noRollbackFor : sans cela, le rollback par defaut de Spring sur exception non
     // controlee annulerait la revocation de la famille (revokeFamily) executee juste
@@ -93,14 +108,17 @@ public class RefreshTokenService {
             throw new RefreshTokenExpiredException("Refresh token expire");
         }
 
-        if (presented.getRevokedAt() != null) {
-            // Un token deja revoque qui reapparait signale un vol probable :
+        // Consommation atomique : deux executions concurrentes sur le meme token (meme id)
+        // sont serialisees par le verrou de ligne pris par l'UPDATE lui-meme - au plus une
+        // seule peut affecter la ligne (rowsUpdated == 1), l'autre voit 0 et est traitee
+        // comme une reutilisation, quel que soit l'ordre reel d'execution.
+        int consumed = refreshTokenRepository.consumeIfActive(presented.getId(), now);
+        if (consumed == 0) {
+            // Un token deja consomme qui reapparait signale un vol probable :
             // toute la lignee est revoquee par defense en profondeur.
             refreshTokenRepository.revokeFamily(presented.getFamilyId(), now);
             throw new RefreshTokenReuseDetectedException("Reutilisation de refresh token detectee");
         }
-
-        presented.setRevokedAt(now);
 
         return createAndPersist(presented.getAccountId(), presented.getFamilyId());
     }
