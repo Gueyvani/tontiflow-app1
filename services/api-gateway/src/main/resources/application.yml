@@ -62,6 +62,22 @@ auth-ip-rate-limit:
   login-per-minute: ${AUTH_IP_RATE_LIMIT_LOGIN_PER_MINUTE:5}
   trusted-proxy-count: ${AUTH_IP_RATE_LIMIT_TRUSTED_PROXY_COUNT:0}
 
+# Rate limiting IP local (in-JVM) de POST /api/v1/auth/refresh (decision
+# R21-D.7, Phase B - constat D4-03/R21-D.4). Cet endpoint est public (permitAll)
+# et n'etait rate-limite nulle part. L'IP est la seule dimension exploitable au
+# Gateway ici : le refresh token brut n'est ni decodable ni resolvable en
+# accountId sans dupliquer RefreshTokenRepository au Gateway. Limite
+# volontairement plus haute que auth-ip-rate-limit.login-per-minute : /refresh
+# est appele automatiquement (renouvellement de session), a un rythme
+# structurellement plus eleve qu'un login humain ponctuel. Fenetre glissante
+# d'une minute, NON distribue (compteurs par instance, remis a zero au
+# redemarrage). Meme semantique trusted-proxy-count que les deux filtres
+# ci-dessus : 0 = X-Forwarded-For ignore (pair TCP uniquement, defaut sur).
+refresh-ip-rate-limit:
+  enabled: ${REFRESH_IP_RATE_LIMIT_ENABLED:true}
+  refresh-per-minute: ${REFRESH_IP_RATE_LIMIT_REFRESH_PER_MINUTE:30}
+  trusted-proxy-count: ${REFRESH_IP_RATE_LIMIT_TRUSTED_PROXY_COUNT:0}
+
 # Actuator limite au strict necessaire pour permettre une sonde de sante sans
 # JWT (orchestration - Docker/K8s) sans exposer d'informations sensibles
 # (decision R11, corrections techniques - meme pattern deja etabli par
