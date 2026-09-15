@@ -49,11 +49,33 @@ public class AuthAccountService {
     private static final Duration DELAY_AT_FIVE_FAILURES = Duration.ofSeconds(10);
     private static final Duration DELAY_AT_SIX_OR_MORE_FAILURES = Duration.ofSeconds(30);
 
+    /**
+     * Mot de passe arbitraire utilisé uniquement pour produire le hash factice
+     * ci-dessous (décision R21-D.8, constat D4-04/R21-D.4) — jamais comparé à
+     * un mot de passe réel, ne correspond à aucun compte.
+     */
+    private static final String DUMMY_PASSWORD_FOR_TIMING = "R21-D8-dummy-password-never-used-for-real-auth";
+
     private final AuthAccountRepository authAccountRepository;
     private final RoleRepository roleRepository;
     private final PasswordEncoder passwordEncoder;
     private final Clock clock;
     private final Duration failureWindow;
+
+    /**
+     * Hash BCrypt factice (décision R21-D.8, constat D4-04/R21-D.4 — oracle de
+     * timing sur email inconnu), calculé <b>une seule fois</b> ici, à la
+     * construction de ce bean singleton, via le {@link PasswordEncoder}
+     * réellement configuré — jamais recalculé par requête. Utilisé
+     * exclusivement pour que le chemin « email inconnu » exécute un coût
+     * BCrypt comparable à celui du chemin « email connu », sans jamais
+     * authentifier qui que ce soit ni correspondre à un compte réel. Suit
+     * automatiquement toute évolution future de
+     * {@code security.password.bcrypt-strength} (recalculé à chaque
+     * démarrage avec l'encodeur courant), sans valeur à resynchroniser
+     * manuellement.
+     */
+    private final String dummyPasswordHash;
 
     /**
      * @param failureWindow fenêtre glissante au-delà de laquelle le compteur d'échecs
@@ -72,6 +94,7 @@ public class AuthAccountService {
         // deja utilise pour jwt.access-token-ttl / refresh-token.ttl, garanti sans
         // ambiguite de conversion @Value (meme motif que RefreshTokenService).
         this.failureWindow = DurationStyle.detectAndParse(failureWindow);
+        this.dummyPasswordHash = passwordEncoder.encode(DUMMY_PASSWORD_FOR_TIMING);
     }
 
     /**
@@ -154,6 +177,23 @@ public class AuthAccountService {
      * <b>manuel/administratif</b> ({@link AccountStatus#LOCKED},
      * {@link AccountLockedException}, HTTP 423), inchangé.</p>
      *
+     * <p><strong>Oracle de timing sur email inconnu (décision R21-D.8, constat
+     * D4-04/R21-D.4)</strong> : un email inconnu exécute désormais, lui aussi,
+     * un appel {@code passwordEncoder.matches(...)} — contre {@link #dummyPasswordHash},
+     * un hash factice sans rapport avec un compte réel — avant de lever
+     * {@link AccountNotFoundException}. Objectif unique : rendre ce chemin
+     * comparable en coût BCrypt au chemin « email connu », qui exécute déjà
+     * systématiquement ce même calcul. Un résidu de latence lié à l'écriture
+     * DB de {@link AuthAccountRepository#registerFailedAttempt} (absente sur
+     * ce chemin) reste possible mais est très largement réduit par rapport à
+     * l'écart initial (mesure R21-D.8, Phase B.1 : de l'ordre de 300+ ms avant
+     * remédiation, à quelques centaines de microsecondes à quelques
+     * millisecondes après — non éliminé à 100 %, mais non exploitable de
+     * façon fiable dans le modèle de menace retenu). Ce chemin n'accède à
+     * {@link AuthAccountRepository} qu'en lecture ({@code findByEmail}) :
+     * aucun état (compteur, délai R21-D.5) n'est jamais créé pour un email
+     * inexistant.</p>
+     *
      * @param email       email du compte
      * @param rawPassword mot de passe en clair fourni pour la tentative
      * @return le compte authentifié (statut {@link AccountStatus#ACTIVE})
@@ -169,8 +209,17 @@ public class AuthAccountService {
     // InvalidCredentialsException est levee juste apres, videant le ralentissement de tout effet.
     @Transactional(noRollbackFor = InvalidCredentialsException.class)
     public AuthAccount authenticate(String email, String rawPassword) {
-        AuthAccount account = authAccountRepository.findByEmail(email)
-                .orElseThrow(() -> new AccountNotFoundException("Aucun compte pour cet email"));
+        Optional<AuthAccount> maybeAccount = authAccountRepository.findByEmail(email);
+        if (maybeAccount.isEmpty()) {
+            // Oracle de timing (decision R21-D.8, constat D4-04/R21-D.4) : meme cout BCrypt
+            // que le chemin email connu, contre un hash factice sans rapport avec un compte
+            // reel (voir dummyPasswordHash) - resultat delibrement ignore, seul le cout
+            // d'execution compte ici. Aucun acces a AuthAccountRepository au-dela du
+            // findByEmail ci-dessus : aucun etat R21-D.5 (compteur, delai) n'est cree.
+            passwordEncoder.matches(rawPassword, dummyPasswordHash);
+            throw new AccountNotFoundException("Aucun compte pour cet email");
+        }
+        AuthAccount account = maybeAccount.get();
 
         // Toujours execute, meme si un ralentissement est actif : le cout (hachage BCrypt)
         // doit rester identique dans tous les cas ou l'email existe, pour ne jamais laisser

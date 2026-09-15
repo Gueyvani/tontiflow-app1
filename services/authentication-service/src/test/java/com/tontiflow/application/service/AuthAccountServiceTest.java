@@ -19,6 +19,7 @@ import com.tontiflow.infrastructure.repository.RoleRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
@@ -28,6 +29,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -35,7 +37,11 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -71,6 +77,11 @@ class AuthAccountServiceTest {
 
     private AuthAccountService newService(Clock clock, String failureWindow) {
         return new AuthAccountService(authAccountRepository, roleRepository, passwordEncoder, clock, failureWindow);
+    }
+
+    /** Variante de {@link #newService} avec un encodeur injectable (décision R21-D.8, D4-04) — permet un espionnage Mockito du {@link PasswordEncoder} réel sans affecter {@link #authAccountService}. */
+    private AuthAccountService newServiceWithEncoder(PasswordEncoder encoder) {
+        return new AuthAccountService(authAccountRepository, roleRepository, encoder, Clock.fixed(FIXED_NOW, ZoneOffset.UTC), "15m");
     }
 
     @Test
@@ -109,6 +120,62 @@ class AuthAccountServiceTest {
 
         assertThatThrownBy(() -> authAccountService.authenticate("unknown@tontiflow.test", TEST_PASSWORD))
                 .isInstanceOf(AccountNotFoundException.class);
+    }
+
+    // ------------------------------------------------------------------
+    // Décision R21-D.8 (constat D4-04/R21-D.4) : oracle de timing sur email
+    // inconnu. Le chemin email-inconnu doit désormais exécuter, lui aussi, un
+    // vrai appel BCrypt (contre un hash factice, jamais un vrai compte) avant
+    // de lever AccountNotFoundException — sans jamais créer d'état R21-D.5.
+    // Le PasswordEncoder de la classe est un BCryptPasswordEncoder réel (pas
+    // un mock) : on l'espionne (Mockito.spy) au lieu de le simuler, pour
+    // vérifier une invocation réelle tout en conservant son comportement
+    // cryptographique effectif — cohérent avec le choix déjà fait pour le
+    // reste de cette classe de test (voir javadoc de classe).
+    // ------------------------------------------------------------------
+
+    @Test
+    void authenticate_withUnknownEmail_invokesDummyBCryptMatch_andCreatesNoR21D5State() {
+        PasswordEncoder spyEncoder = spy(new BCryptPasswordEncoder());
+        AuthAccountService serviceWithSpy = newServiceWithEncoder(spyEncoder);
+        when(authAccountRepository.findByEmail("unknown-dummy@tontiflow.test")).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> serviceWithSpy.authenticate("unknown-dummy@tontiflow.test", TEST_PASSWORD))
+                .isInstanceOf(AccountNotFoundException.class);
+
+        // Un appel BCrypt reel a bien lieu meme pour un email inconnu - c'est le mecanisme
+        // qui ferme l'oracle de timing (le resultat de matches() est ignore par construction).
+        verify(spyEncoder).matches(eq(TEST_PASSWORD), anyString());
+        // Aucun etat R21-D.5 (compteur/delai de ralentissement) ne doit jamais etre cree
+        // pour un email inexistant : ce chemin n'accede a AuthAccountRepository qu'en
+        // lecture (findByEmail), jamais en ecriture.
+        verify(authAccountRepository, never()).registerFailedAttempt(any(), any(), any(), any(), any(), any(), any());
+        verify(authAccountRepository, never()).resetFailedAttempts(any());
+    }
+
+    @Test
+    void authenticate_unknownEmailAndKnownEmail_compareAgainstDifferentBCryptHashes() {
+        // Preuve que le chemin email-inconnu compare bien contre le hash FACTICE (jamais
+        // celui d'un compte reel) alors que le chemin email-connu compare bien contre le
+        // VRAI hash du compte - les deux executent un round BCrypt comparable, mais jamais
+        // contre la meme valeur.
+        PasswordEncoder spyEncoder = spy(new BCryptPasswordEncoder());
+        AuthAccountService serviceWithSpy = newServiceWithEncoder(spyEncoder);
+        AuthAccount knownAccount = activeAccount("hashdiff@tontiflow.test", TEST_PASSWORD);
+        when(authAccountRepository.findByEmail("unknown-hashdiff@tontiflow.test")).thenReturn(Optional.empty());
+        when(authAccountRepository.findByEmail("hashdiff@tontiflow.test")).thenReturn(Optional.of(knownAccount));
+
+        assertThatThrownBy(() -> serviceWithSpy.authenticate("unknown-hashdiff@tontiflow.test", "peu-importe-1234"))
+                .isInstanceOf(AccountNotFoundException.class);
+        assertThatThrownBy(() -> serviceWithSpy.authenticate("hashdiff@tontiflow.test", "mauvais-mot-de-passe"))
+                .isInstanceOf(InvalidCredentialsException.class);
+
+        ArgumentCaptor<String> hashCaptor = ArgumentCaptor.forClass(String.class);
+        verify(spyEncoder, times(2)).matches(anyString(), hashCaptor.capture());
+        List<String> comparedHashes = hashCaptor.getAllValues();
+
+        assertThat(comparedHashes.get(0)).isNotEqualTo(knownAccount.getPasswordHash()); // email inconnu -> hash factice
+        assertThat(comparedHashes.get(1)).isEqualTo(knownAccount.getPasswordHash());    // email connu -> vrai hash
     }
 
     @Test
