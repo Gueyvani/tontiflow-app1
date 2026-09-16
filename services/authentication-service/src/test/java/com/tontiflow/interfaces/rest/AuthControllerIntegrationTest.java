@@ -23,7 +23,14 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.ActiveProfiles;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -77,14 +84,73 @@ class AuthControllerIntegrationTest {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
     }
 
+    // ------------------------------------------------------------------
+    // Décision R21-D.9 (constat D4-05/R21-D.4, Option C) : réponse
+    // strictement uniforme entre email disponible et email déjà pris -
+    // /register ne renvoie plus 409, pour empêcher toute énumération de
+    // comptes. Ne se contente pas d'asserter 201 isolément : compare
+    // directement les deux réponses pour prouver l'absence de distinction
+    // observable (statut ET corps), conformément à la propriété de sécurité
+    // visée, pas seulement au nouveau contrat de surface.
+    // ------------------------------------------------------------------
+
     @Test
-    void register_withAlreadyUsedEmail_returns409() {
-        register("duplicate@tontiflow.test", TEST_PASSWORD);
+    void register_withAlreadyUsedEmail_isObservablyIdenticalToAvailableEmail() {
+        register("duplicate-uniform@tontiflow.test", TEST_PASSWORD);
+        AuthAccount beforeSecondAttempt = authAccountRepository.findByEmail("duplicate-uniform@tontiflow.test").orElseThrow();
 
-        ResponseEntity<ErrorResponse> response = restTemplate.postForEntity(
-                "/api/v1/auth/register", new RegisterRequest("duplicate@tontiflow.test", TEST_PASSWORD), ErrorResponse.class);
+        ResponseEntity<Void> responseForExistingEmail = register("duplicate-uniform@tontiflow.test", TEST_PASSWORD);
+        ResponseEntity<Void> responseForNewEmail = register("brand-new-uniform@tontiflow.test", TEST_PASSWORD);
 
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(responseForExistingEmail.getStatusCode()).isEqualTo(responseForNewEmail.getStatusCode());
+        assertThat(responseForExistingEmail.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(responseForExistingEmail.getBody()).isEqualTo(responseForNewEmail.getBody());
+        assertThat(responseForExistingEmail.getBody()).isNull();
+
+        // Aucun nouveau compte ne doit avoir remplace/duplique l'original : meme identifiant
+        // qu'avant la seconde tentative d'inscription sur cet email.
+        AuthAccount afterSecondAttempt = authAccountRepository.findByEmail("duplicate-uniform@tontiflow.test").orElseThrow();
+        assertThat(afterSecondAttempt.getId()).isEqualTo(beforeSecondAttempt.getId());
+    }
+
+    // Course concurrente contre la contrainte uk_auth_account_email (decision R21-D.9,
+    // Etape 7) : N requetes HTTP reelles, memes threads, meme email, demarrees
+    // simultanement (CountDownLatch) - preuve que le contrat observable reste uniforme
+    // (jamais de 500) et qu'une seule ligne est effectivement persistee, meme sous
+    // chevauchement reel des transactions (pas une simple repetition sequentielle).
+    @Test
+    void register_concurrentRequestsWithSameEmail_neverReturns500_andPersistsExactlyOneAccount() throws Exception {
+        String email = "register-race@tontiflow.test";
+        int threadCount = 10;
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+        CountDownLatch readyLatch = new CountDownLatch(threadCount);
+        CountDownLatch startLatch = new CountDownLatch(1);
+        List<Future<ResponseEntity<Void>>> futures = new ArrayList<>();
+
+        for (int i = 0; i < threadCount; i++) {
+            futures.add(executor.submit(() -> {
+                readyLatch.countDown();
+                startLatch.await(5, TimeUnit.SECONDS);
+                return register(email, TEST_PASSWORD);
+            }));
+        }
+        readyLatch.await(5, TimeUnit.SECONDS);
+        startLatch.countDown();
+
+        for (Future<ResponseEntity<Void>> future : futures) {
+            ResponseEntity<Void> response = future.get(10, TimeUnit.SECONDS);
+            // Contrat uniforme : jamais de 500, toujours exactement la meme reponse que
+            // pour un enregistrement disponible - aucune requete ne doit pouvoir deduire
+            // qu'elle a "perdu" une course contre une autre.
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+            assertThat(response.getBody()).isNull();
+        }
+        executor.shutdown();
+
+        // La contrainte DB (protection finale) garantit structurellement qu'une seule ligne
+        // existe pour cet email, quel que soit le nombre de requetes concurrentes.
+        AuthAccount persisted = authAccountRepository.findByEmail(email).orElseThrow();
+        assertThat(persisted.getEmail()).isEqualTo(email);
     }
 
     @Test

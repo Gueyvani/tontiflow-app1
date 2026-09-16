@@ -78,6 +78,21 @@ refresh-ip-rate-limit:
   refresh-per-minute: ${REFRESH_IP_RATE_LIMIT_REFRESH_PER_MINUTE:30}
   trusted-proxy-count: ${REFRESH_IP_RATE_LIMIT_TRUSTED_PROXY_COUNT:0}
 
+# Rate limiting IP local (in-JVM) de POST /api/v1/auth/register (decision
+# R21-D.9, Phase B - constat D4-05/R21-D.4, Option C). Second volet de la
+# remediation D4-05 : la reponse HTTP uniforme (email disponible vs deja pris,
+# cf. AuthAccountService/AuthController) ferme la certitude du signal
+# d'enumeration ; ce filtre en reduit le volume exploitable par IP. Limite du
+# meme ordre de grandeur que auth-ip-rate-limit.login-per-minute : l'inscription,
+# comme la connexion, est un acte humain ponctuel. Fenetre glissante d'une
+# minute, NON distribue (compteurs par instance, remis a zero au redemarrage).
+# Meme semantique trusted-proxy-count que les trois filtres ci-dessus :
+# 0 = X-Forwarded-For ignore (pair TCP uniquement, defaut sur).
+register-ip-rate-limit:
+  enabled: ${REGISTER_IP_RATE_LIMIT_ENABLED:true}
+  register-per-minute: ${REGISTER_IP_RATE_LIMIT_REGISTER_PER_MINUTE:5}
+  trusted-proxy-count: ${REGISTER_IP_RATE_LIMIT_TRUSTED_PROXY_COUNT:0}
+
 # Actuator limite au strict necessaire pour permettre une sonde de sante sans
 # JWT (orchestration - Docker/K8s) sans exposer d'informations sensibles
 # (decision R11, corrections techniques - meme pattern deja etabli par

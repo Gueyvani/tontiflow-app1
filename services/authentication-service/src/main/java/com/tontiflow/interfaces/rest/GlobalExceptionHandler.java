@@ -4,7 +4,6 @@ import com.tontiflow.application.exception.AccountDisabledException;
 import com.tontiflow.application.exception.AccountLockedException;
 import com.tontiflow.application.exception.AccountNotFoundException;
 import com.tontiflow.application.exception.AccountNotFoundInAdminException;
-import com.tontiflow.application.exception.DuplicateEmailException;
 import com.tontiflow.application.exception.DuplicatePermissionNameException;
 import com.tontiflow.application.exception.DuplicateRoleNameException;
 import com.tontiflow.application.exception.InvalidCredentialsException;
@@ -64,10 +63,11 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.FORBIDDEN, "Account disabled", request);
     }
 
-    @ExceptionHandler(DuplicateEmailException.class)
-    public ResponseEntity<ErrorResponse> handleDuplicateEmail(HttpServletRequest request) {
-        return build(HttpStatus.CONFLICT, "Email already in use", request);
-    }
+    // handleDuplicateEmail retire (decision R21-D.9, constat D4-05/R21-D.4, Option C) :
+    // DuplicateEmailException n'est plus jamais levee par AuthAccountService.createAccount
+    // (reponse desormais strictement uniforme entre email disponible et deja pris, geree
+    // dans AuthController.register) - ce handler etait devenu inatteignable. La classe
+    // DuplicateEmailException elle-meme n'est pas supprimee (hors perimetre de ce ticket).
 
     @ExceptionHandler(InvalidRefreshTokenException.class)
     public ResponseEntity<ErrorResponse> handleInvalidRefreshToken(HttpServletRequest request) {

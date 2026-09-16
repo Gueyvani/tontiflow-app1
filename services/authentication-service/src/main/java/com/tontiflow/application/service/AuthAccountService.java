@@ -5,7 +5,6 @@ import com.tontiflow.application.exception.AccountDisabledException;
 import com.tontiflow.application.exception.AccountLockedException;
 import com.tontiflow.application.exception.AccountNotFoundException;
 import com.tontiflow.application.exception.AccountNotFoundInAdminException;
-import com.tontiflow.application.exception.DuplicateEmailException;
 import com.tontiflow.application.exception.InvalidCredentialsException;
 import com.tontiflow.application.exception.RoleAlreadyAssignedException;
 import com.tontiflow.application.exception.RoleNotAssignedException;
@@ -104,15 +103,48 @@ public class AuthAccountService {
      * hash BCrypt ({@link PasswordEncoder}) est stocké dans
      * {@code AuthAccount.passwordHash}.</p>
      *
-     * @param email       email du nouveau compte, doit être unique
-     * @param rawPassword mot de passe en clair, haché avant persistance
-     * @return le compte créé et persisté
-     * @throws DuplicateEmailException si un compte existe déjà pour cet email
+     * <p><strong>Absence de signal d'existence (décision R21-D.9, constat
+     * D4-05/R21-D.4, Option C)</strong> : contrairement au comportement
+     * antérieur, cette méthode ne lève <b>plus</b> d'exception distincte
+     * lorsque l'email est déjà utilisé — elle retourne silencieusement,
+     * exactement comme après une création réussie. C'est
+     * {@link com.tontiflow.interfaces.rest.AuthController#register} qui
+     * traduit ce comportement en une réponse HTTP strictement identique dans
+     * les deux cas, empêchant toute énumération de comptes via {@code
+     * /api/v1/auth/register}. Le contrôle {@code existsByEmail} reste un
+     * simple raccourci de performance (évite un hachage BCrypt et une
+     * tentative d'écriture vouée à l'échec dans le cas non concurrent le
+     * plus courant) — il n'est <b>pas</b> la protection réelle contre les
+     * doublons, qui reste entièrement portée par la contrainte
+     * {@code uk_auth_account_email} (voir ci-dessous, gestion de la
+     * course).</p>
+     *
+     * <p><strong>Course concurrente</strong> : si deux requêtes concurrentes
+     * passent toutes deux {@code existsByEmail() == false} avant qu'aucune
+     * n'ait validé son écriture, la seconde à atteindre la validation de
+     * cette transaction échoue sur la contrainte unique {@code
+     * uk_auth_account_email} — {@link org.springframework.dao.DataIntegrityViolationException}.
+     * Cette méthode ne capture <b>volontairement pas</b> cette exception en
+     * interne (elle laisse le proxy {@code @Transactional} de Spring
+     * effectuer un rollback complet et protocolairement correct de cette
+     * transaction <b>avant</b> de la propager à l'appelant) : un
+     * {@code catch} local autour de l'écriture, sans annuler explicitement la
+     * transaction, risquerait de la laisser dans un état inutilisable
+     * côté moteur (une transaction PostgreSQL avortée par une violation de
+     * contrainte le reste jusqu'à un {@code ROLLBACK} explicite, qu'une
+     * simple capture Java ne déclenche pas). {@link
+     * com.tontiflow.interfaces.rest.AuthController#register} capture cette
+     * exception <b>après</b> ce rollback complet (la transaction est déjà
+     * intégralement close à ce point) et la traite exactement comme le cas
+     * « email déjà pris ».</p>
+     *
+     * @param email       email du nouveau compte
+     * @param rawPassword mot de passe en clair, haché avant persistance si le compte est créé
      */
     @Transactional
-    public AuthAccount createAccount(String email, String rawPassword) {
+    public void createAccount(String email, String rawPassword) {
         if (authAccountRepository.existsByEmail(email)) {
-            throw new DuplicateEmailException("Un compte existe deja pour cet email");
+            return;
         }
 
         AuthAccount account = new AuthAccount();
@@ -120,7 +152,7 @@ public class AuthAccountService {
         account.setPasswordHash(passwordEncoder.encode(rawPassword));
         account.setStatus(AccountStatus.ACTIVE);
 
-        return authAccountRepository.save(account);
+        authAccountRepository.save(account);
     }
 
     /**

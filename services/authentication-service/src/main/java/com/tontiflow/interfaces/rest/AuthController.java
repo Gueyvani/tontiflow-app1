@@ -12,6 +12,7 @@ import com.tontiflow.interfaces.rest.dto.RefreshTokenRequest;
 import com.tontiflow.interfaces.rest.dto.RegisterRequest;
 import com.tontiflow.interfaces.rest.dto.TokenResponse;
 import jakarta.validation.Valid;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -49,12 +50,30 @@ public class AuthController {
      * Crée un nouveau compte d'authentification. Ne génère aucun JWT :
      * l'inscription et la connexion restent deux actions distinctes.
      *
+     * <p><strong>Réponse strictement uniforme (décision R21-D.9, constat
+     * D4-05/R21-D.4, Option C)</strong> : que l'email fourni soit disponible,
+     * déjà utilisé, ou perdu dans une course concurrente contre la
+     * contrainte {@code uk_auth_account_email} ({@link DataIntegrityViolationException},
+     * voir {@link AuthAccountService#createAccount}), cette méthode renvoie
+     * exactement la même réponse — {@code 201 Created}, corps vide. Aucun
+     * signal observable ne permet plus de déterminer si un email est déjà
+     * enregistré via cet endpoint.</p>
+     *
      * @param request email + mot de passe du futur compte
-     * @return {@code 201 Created}, corps vide
+     * @return {@code 201 Created}, corps vide, dans tous les cas
      */
     @PostMapping("/register")
     public ResponseEntity<Void> register(@Valid @RequestBody RegisterRequest request) {
-        authAccountService.createAccount(request.email(), request.password());
+        try {
+            authAccountService.createAccount(request.email(), request.password());
+        } catch (DataIntegrityViolationException raceLostAgainstUniqueEmailConstraint) {
+            // Course perdue contre uk_auth_account_email : un autre thread a cree ce
+            // compte entre existsByEmail() et l'ecriture, dans AuthAccountService.createAccount().
+            // Traite exactement comme "email deja pris" - meme reponse, aucune fuite. La
+            // transaction de createAccount() est deja entierement rollback par le proxy
+            // @Transactional de Spring avant que cette exception n'atteigne ce point : aucun
+            // etat "rollback-only" ne fuit jusqu'ici (voir javadoc de createAccount()).
+        }
         return ResponseEntity.status(HttpStatus.CREATED).build();
     }
 

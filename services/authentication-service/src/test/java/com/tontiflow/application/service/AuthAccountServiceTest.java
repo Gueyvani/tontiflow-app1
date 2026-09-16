@@ -5,7 +5,6 @@ import com.tontiflow.application.exception.AccountDisabledException;
 import com.tontiflow.application.exception.AccountLockedException;
 import com.tontiflow.application.exception.AccountNotFoundException;
 import com.tontiflow.application.exception.AccountNotFoundInAdminException;
-import com.tontiflow.application.exception.DuplicateEmailException;
 import com.tontiflow.application.exception.InvalidCredentialsException;
 import com.tontiflow.application.exception.RoleAlreadyAssignedException;
 import com.tontiflow.application.exception.RoleNotAssignedException;
@@ -22,6 +21,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
@@ -35,6 +35,7 @@ import java.util.Set;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -87,21 +88,50 @@ class AuthAccountServiceTest {
     @Test
     void createAccount_withAvailableEmail_createsActiveAccountWithHashedPassword() {
         when(authAccountRepository.existsByEmail("new@tontiflow.test")).thenReturn(false);
-        when(authAccountRepository.save(any(AuthAccount.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        ArgumentCaptor<AuthAccount> savedCaptor = ArgumentCaptor.forClass(AuthAccount.class);
+        when(authAccountRepository.save(savedCaptor.capture())).thenAnswer(invocation -> invocation.getArgument(0));
 
-        AuthAccount created = authAccountService.createAccount("new@tontiflow.test", TEST_PASSWORD);
+        authAccountService.createAccount("new@tontiflow.test", TEST_PASSWORD);
 
+        AuthAccount created = savedCaptor.getValue();
         assertThat(created.getStatus()).isEqualTo(AccountStatus.ACTIVE);
         assertThat(created.getPasswordHash()).isNotNull().isNotEqualTo(TEST_PASSWORD);
         assertThat(passwordEncoder.matches(TEST_PASSWORD, created.getPasswordHash())).isTrue();
     }
 
+    // ------------------------------------------------------------------
+    // Décision R21-D.9 (constat D4-05/R21-D.4, Option C) : absence de signal
+    // d'existence. createAccount() ne leve plus DuplicateEmailException -
+    // elle retourne silencieusement, exactement comme apres une creation
+    // reussie, pour empecher toute enumeration de comptes via /register.
+    // ------------------------------------------------------------------
+
     @Test
-    void createAccount_withExistingEmail_throwsDuplicateEmailException() {
+    void createAccount_withExistingEmail_returnsSilently_withoutCreatingOrThrowing() {
         when(authAccountRepository.existsByEmail("duplicate@tontiflow.test")).thenReturn(true);
 
-        assertThatThrownBy(() -> authAccountService.createAccount("duplicate@tontiflow.test", TEST_PASSWORD))
-                .isInstanceOf(DuplicateEmailException.class);
+        assertThatCode(() -> authAccountService.createAccount("duplicate@tontiflow.test", TEST_PASSWORD))
+                .doesNotThrowAnyException();
+
+        // Aucune ecriture ne doit etre tentee - le raccourci existsByEmail() evite un
+        // hachage BCrypt et un save() voues a l'echec dans ce cas non concurrent.
+        verify(authAccountRepository, never()).save(any());
+    }
+
+    @Test
+    void createAccount_whenSaveViolatesUniqueConstraint_propagatesDataIntegrityViolationException() {
+        // Simule la course concurrente : existsByEmail() a repondu false (aucun compte
+        // trouve a cet instant), mais save() echoue neanmoins sur la contrainte unique
+        // uk_auth_account_email (un autre thread a cree ce compte entre-temps). Cette
+        // methode ne doit PAS capturer l'exception elle-meme (voir javadoc de
+        // createAccount()) - c'est AuthController.register() qui la traite, APRES que
+        // le proxy @Transactional de Spring a deja execute un rollback complet.
+        when(authAccountRepository.existsByEmail("race@tontiflow.test")).thenReturn(false);
+        when(authAccountRepository.save(any(AuthAccount.class)))
+                .thenThrow(new DataIntegrityViolationException("uk_auth_account_email"));
+
+        assertThatThrownBy(() -> authAccountService.createAccount("race@tontiflow.test", TEST_PASSWORD))
+                .isInstanceOf(DataIntegrityViolationException.class);
     }
 
     @Test
