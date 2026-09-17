@@ -93,6 +93,24 @@ register-ip-rate-limit:
   register-per-minute: ${REGISTER_IP_RATE_LIMIT_REGISTER_PER_MINUTE:5}
   trusted-proxy-count: ${REGISTER_IP_RATE_LIMIT_TRUSTED_PROXY_COUNT:0}
 
+# Rate limiting IP local (in-JVM) de /api/v1/admin/** - toutes methodes HTTP
+# (decision R21-RC, Phase B/C - suivi post-R21-D.9). Seul controleur concerne :
+# RbacController (permissions, roles, attribution de roles), deja protege par
+# hasAuthority("ROLE_ADMIN") cote authentication-service - ce filtre ajoute
+# uniquement une limite de debit, sans remplacer cette autorisation. Quota
+# unique par IP, partage entre les sept endpoints d'administration (prefixe,
+# pas un chemin unique comme les quatre filtres ci-dessus). Limite intermediaire
+# entre le regime "action humaine isolee" (login/register: 5/min) et le regime
+# "appel automatique frequent" (refresh: 30/min), car /admin combine navigation
+# (GET) et action deliberee (POST/PUT/DELETE). Fenetre glissante d'une minute,
+# NON distribue (compteurs par instance, remis a zero au redemarrage). Meme
+# semantique trusted-proxy-count que les quatre filtres ci-dessus :
+# 0 = X-Forwarded-For ignore (pair TCP uniquement, defaut sur).
+admin-ip-rate-limit:
+  enabled: ${ADMIN_IP_RATE_LIMIT_ENABLED:true}
+  admin-per-minute: ${ADMIN_IP_RATE_LIMIT_ADMIN_PER_MINUTE:30}
+  trusted-proxy-count: ${ADMIN_IP_RATE_LIMIT_TRUSTED_PROXY_COUNT:0}
+
 # Actuator limite au strict necessaire pour permettre une sonde de sante sans
 # JWT (orchestration - Docker/K8s) sans exposer d'informations sensibles
 # (decision R11, corrections techniques - meme pattern deja etabli par
