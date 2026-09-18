@@ -1,17 +1,22 @@
 package com.tontiflow.interfaces.rest;
 
+import com.tontiflow.UserContext;
 import com.tontiflow.application.service.AuthAccountService;
 import com.tontiflow.application.service.PermissionService;
 import com.tontiflow.application.service.RoleService;
+import com.tontiflow.domain.model.AuthAccount;
 import com.tontiflow.domain.model.Permission;
 import com.tontiflow.domain.model.Role;
+import com.tontiflow.interfaces.rest.dto.AccountStatusResponse;
 import com.tontiflow.interfaces.rest.dto.CreatePermissionRequest;
 import com.tontiflow.interfaces.rest.dto.CreateRoleRequest;
 import com.tontiflow.interfaces.rest.dto.PermissionResponse;
 import com.tontiflow.interfaces.rest.dto.RoleResponse;
+import com.tontiflow.interfaces.rest.dto.UpdateAccountStatusRequest;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -27,8 +32,8 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 /**
- * Administration RBAC minimale : permissions, rôles, et attribution des
- * rôles aux comptes.
+ * Administration : permissions, rôles, attribution des rôles aux comptes, et
+ * changement administratif du statut d'un compte (décision R21-RD).
  *
  * <p>Aucune logique métier ici : chaque méthode délègue intégralement à
  * {@link PermissionService}, {@link RoleService} ou {@link AuthAccountService}
@@ -94,6 +99,30 @@ public class RbacController {
     public ResponseEntity<Void> removeRoleFromAccount(@PathVariable UUID accountId, @PathVariable UUID roleId) {
         authAccountService.removeRole(accountId, roleId);
         return ResponseEntity.noContent().build();
+    }
+
+    /**
+     * Change administrativement le statut d'un compte (décision R21-RD).
+     *
+     * <p>L'identité de l'administrateur acteur provient exclusivement du
+     * contexte d'authentification déjà vérifié ({@code authentication.getPrincipal()},
+     * porté par le JWT validé) — jamais du corps de la requête, qui ne
+     * contient que le statut cible et le motif obligatoire. Réponse
+     * strictement identique (200, {@link AccountStatusResponse}) que la
+     * transition ait réellement eu lieu ou que le compte possédait déjà le
+     * statut demandé (idempotence, D3) — le motif n'apparaît jamais dans
+     * cette réponse (D4/D8).</p>
+     *
+     * @return {@code 200 OK} avec {@link AccountStatusResponse}
+     */
+    @PutMapping("/accounts/{accountId}/status")
+    public ResponseEntity<AccountStatusResponse> updateAccountStatus(
+            @PathVariable UUID accountId, @Valid @RequestBody UpdateAccountStatusRequest request,
+            Authentication authentication) {
+        UserContext caller = (UserContext) authentication.getPrincipal();
+        AuthAccount account = authAccountService.changeAccountStatus(
+                accountId, request.status(), request.reason(), caller.userId());
+        return ResponseEntity.ok(new AccountStatusResponse(account.getId(), account.getEmail(), request.status()));
     }
 
     private PermissionResponse toResponse(Permission permission) {

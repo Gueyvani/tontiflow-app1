@@ -227,6 +227,65 @@ class AuthAccountRepositoryTest {
                 now.plusSeconds(2), now.plusSeconds(5), now.plusSeconds(10), now.plusSeconds(30));
     }
 
+    // ------------------------------------------------------------------
+    // Décision R21-RD (D2/D7) : transition administrative atomique de
+    // statut - SQL réel (H2), séquentiel. La preuve sous accès CONCURRENT
+    // réel est apportée séparément par AccountStatusConcurrencyIntegrationTest.
+    // ------------------------------------------------------------------
+
+    @Test
+    void transitionStatusIfAllowed_activeToLocked_withActiveAsAllowedSource_succeeds() {
+        UUID id = authAccountRepository.save(newAccount("ts1@tontiflow.test")).getId();
+
+        int rows = authAccountRepository.transitionStatusIfAllowed(
+                id, AccountStatus.LOCKED.name(), java.util.List.of(AccountStatus.ACTIVE.name()));
+
+        assertThat(rows).isEqualTo(1);
+        assertThat(reload(id).getStatus()).isEqualTo(AccountStatus.LOCKED);
+    }
+
+    @Test
+    void transitionStatusIfAllowed_whenCurrentStatusNotInAllowedSources_isNoOp() {
+        // Simule une transition interdite (ex. DISABLED -> LOCKED, decision R21-RD D2) :
+        // le compte est DISABLED, seul ACTIVE est source autorisee pour la cible LOCKED.
+        AuthAccount account = newAccount("ts2@tontiflow.test");
+        account.setStatus(AccountStatus.DISABLED);
+        UUID id = authAccountRepository.save(account).getId();
+
+        int rows = authAccountRepository.transitionStatusIfAllowed(
+                id, AccountStatus.LOCKED.name(), java.util.List.of(AccountStatus.ACTIVE.name()));
+
+        assertThat(rows).isEqualTo(0); // aucune ligne affectee : WHERE non satisfaite
+        assertThat(reload(id).getStatus()).isEqualTo(AccountStatus.DISABLED); // inchange
+    }
+
+    @Test
+    void transitionStatusIfAllowed_withMultipleAllowedSources_disabledFromLocked_succeeds() {
+        // Cible DISABLED, sources autorisees {ACTIVE, LOCKED} (decision R21-RD D2).
+        AuthAccount account = newAccount("ts3@tontiflow.test");
+        account.setStatus(AccountStatus.LOCKED);
+        UUID id = authAccountRepository.save(account).getId();
+
+        int rows = authAccountRepository.transitionStatusIfAllowed(
+                id, AccountStatus.DISABLED.name(),
+                java.util.List.of(AccountStatus.ACTIVE.name(), AccountStatus.LOCKED.name()));
+
+        assertThat(rows).isEqualTo(1);
+        assertThat(reload(id).getStatus()).isEqualTo(AccountStatus.DISABLED);
+    }
+
+    @Test
+    void transitionStatusIfAllowed_doesNotAffectOtherAccounts() {
+        UUID targetId = authAccountRepository.save(newAccount("ts4-target@tontiflow.test")).getId();
+        UUID otherId = authAccountRepository.save(newAccount("ts4-other@tontiflow.test")).getId();
+
+        authAccountRepository.transitionStatusIfAllowed(
+                targetId, AccountStatus.LOCKED.name(), java.util.List.of(AccountStatus.ACTIVE.name()));
+
+        assertThat(reload(targetId).getStatus()).isEqualTo(AccountStatus.LOCKED);
+        assertThat(reload(otherId).getStatus()).isEqualTo(AccountStatus.ACTIVE); // jamais touche
+    }
+
     /**
      * clear() : un UPDATE en masse ({@code @Modifying}) passe directement par JDBC et ne
      * met pas à jour le cache de premier niveau JPA — sans cela, {@code findById(...)}

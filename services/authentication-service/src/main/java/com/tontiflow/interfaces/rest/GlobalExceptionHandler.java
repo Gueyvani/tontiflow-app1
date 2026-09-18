@@ -6,6 +6,7 @@ import com.tontiflow.application.exception.AccountNotFoundException;
 import com.tontiflow.application.exception.AccountNotFoundInAdminException;
 import com.tontiflow.application.exception.DuplicatePermissionNameException;
 import com.tontiflow.application.exception.DuplicateRoleNameException;
+import com.tontiflow.application.exception.InvalidAccountStatusTransitionException;
 import com.tontiflow.application.exception.InvalidCredentialsException;
 import com.tontiflow.application.exception.InvalidRefreshTokenException;
 import com.tontiflow.application.exception.PermissionAlreadyAssignedException;
@@ -127,6 +128,13 @@ public class GlobalExceptionHandler {
         // Traite comme une ressource introuvable (l'association demandee n'existe pas),
         // coherent avec RoleNotFoundException/PermissionNotFoundException ci-dessus.
         return build(HttpStatus.NOT_FOUND, "Role not assigned to this account", request);
+    }
+
+    @ExceptionHandler(InvalidAccountStatusTransitionException.class)
+    public ResponseEntity<ErrorResponse> handleInvalidAccountStatusTransition(HttpServletRequest request) {
+        // Message generique fixe (jamais ex.getMessage()) - coherent avec tous les
+        // handlers ci-dessus, aucun n'expose le message dynamique d'une exception.
+        return build(HttpStatus.BAD_REQUEST, "Invalid account status transition", request);
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

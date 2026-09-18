@@ -120,9 +120,75 @@ class RefreshTokenRepositoryTest {
         assertThat(reloaded.getRevokedAt()).isEqualTo(originalRevocation);
     }
 
+    // ------------------------------------------------------------------
+    // Décision R21-RD (D6) : révocation de toutes les familles actives d'un
+    // compte - SQL réel (H2), séquentiel.
+    // ------------------------------------------------------------------
+
+    @Test
+    @Transactional
+    void revokeAllActiveForAccount_revokesEveryActiveFamilyOfThatAccount() {
+        UUID accountId = UUID.randomUUID();
+        // Deux familles actives distinctes pour le MEME compte (ex. deux appareils) -
+        // RefreshTokenService.issue() ouvre une nouvelle famille a chaque emission.
+        RefreshToken familyOne = refreshTokenRepository.save(newTokenForAccount("hash-r21rd-1", accountId, UUID.randomUUID()));
+        RefreshToken familyTwo = refreshTokenRepository.save(newTokenForAccount("hash-r21rd-2", accountId, UUID.randomUUID()));
+
+        Instant revocationTime = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+        int revokedCount = refreshTokenRepository.revokeAllActiveForAccount(accountId, revocationTime);
+        // clear() : @Modifying nativeQuery sans clearAutomatically (a la difference de
+        // revokeFamily, JPQL + clearAutomatically=true) - meme necessite documentee pour
+        // consumeIfActive_success ci-dessus.
+        entityManager.clear();
+
+        assertThat(revokedCount).isEqualTo(2);
+        RefreshToken reloadedOne = refreshTokenRepository.findById(familyOne.getId()).orElseThrow();
+        RefreshToken reloadedTwo = refreshTokenRepository.findById(familyTwo.getId()).orElseThrow();
+        assertThat(reloadedOne.getRevokedAt()).isEqualTo(revocationTime);
+        assertThat(reloadedTwo.getRevokedAt()).isEqualTo(revocationTime);
+    }
+
+    @Test
+    @Transactional
+    void revokeAllActiveForAccount_doesNotAffectOtherAccounts() {
+        UUID targetAccountId = UUID.randomUUID();
+        UUID otherAccountId = UUID.randomUUID();
+        RefreshToken targetToken = refreshTokenRepository.save(newTokenForAccount("hash-r21rd-3", targetAccountId, UUID.randomUUID()));
+        RefreshToken otherToken = refreshTokenRepository.save(newTokenForAccount("hash-r21rd-4", otherAccountId, UUID.randomUUID()));
+
+        refreshTokenRepository.revokeAllActiveForAccount(targetAccountId, Instant.now());
+        entityManager.clear();
+
+        RefreshToken reloadedTarget = refreshTokenRepository.findById(targetToken.getId()).orElseThrow();
+        RefreshToken reloadedOther = refreshTokenRepository.findById(otherToken.getId()).orElseThrow();
+        assertThat(reloadedTarget.getRevokedAt()).isNotNull();
+        assertThat(reloadedOther.getRevokedAt()).isNull(); // jamais touche
+    }
+
+    @Test
+    @Transactional
+    void revokeAllActiveForAccount_neverOverwritesAlreadyRevokedTimestamp() {
+        UUID accountId = UUID.randomUUID();
+        RefreshToken token = newTokenForAccount("hash-r21rd-5", accountId, UUID.randomUUID());
+        Instant originalRevocation = Instant.parse("2026-01-01T00:00:00Z");
+        token.setRevokedAt(originalRevocation);
+        RefreshToken saved = refreshTokenRepository.save(token);
+
+        int revokedCount = refreshTokenRepository.revokeAllActiveForAccount(accountId, Instant.now());
+        entityManager.clear();
+
+        assertThat(revokedCount).isZero(); // deja revoque, non compte dans le nombre de lignes affectees
+        RefreshToken reloaded = refreshTokenRepository.findById(saved.getId()).orElseThrow();
+        assertThat(reloaded.getRevokedAt()).isEqualTo(originalRevocation); // jamais ecrase
+    }
+
     private static RefreshToken newToken(String tokenHash, UUID familyId) {
+        return newTokenForAccount(tokenHash, UUID.randomUUID(), familyId);
+    }
+
+    private static RefreshToken newTokenForAccount(String tokenHash, UUID accountId, UUID familyId) {
         RefreshToken token = new RefreshToken();
-        token.setAccountId(UUID.randomUUID());
+        token.setAccountId(accountId);
         token.setTokenHash(tokenHash);
         token.setFamilyId(familyId);
         token.setIssuedAt(Instant.now());

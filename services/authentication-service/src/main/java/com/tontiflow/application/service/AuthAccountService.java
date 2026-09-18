@@ -5,16 +5,20 @@ import com.tontiflow.application.exception.AccountDisabledException;
 import com.tontiflow.application.exception.AccountLockedException;
 import com.tontiflow.application.exception.AccountNotFoundException;
 import com.tontiflow.application.exception.AccountNotFoundInAdminException;
+import com.tontiflow.application.exception.InvalidAccountStatusTransitionException;
 import com.tontiflow.application.exception.InvalidCredentialsException;
 import com.tontiflow.application.exception.RoleAlreadyAssignedException;
 import com.tontiflow.application.exception.RoleNotAssignedException;
 import com.tontiflow.application.exception.RoleNotFoundException;
 import com.tontiflow.domain.enums.AccountStatus;
+import com.tontiflow.domain.model.AccountStatusChange;
 import com.tontiflow.domain.model.AuthAccount;
 import com.tontiflow.domain.model.Permission;
 import com.tontiflow.domain.model.Role;
+import com.tontiflow.infrastructure.repository.AccountStatusChangeRepository;
 import com.tontiflow.infrastructure.repository.AuthAccountRepository;
 import com.tontiflow.infrastructure.repository.RoleRepository;
+import jakarta.persistence.EntityManager;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.convert.DurationStyle;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -24,6 +28,8 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -55,11 +61,33 @@ public class AuthAccountService {
      */
     private static final String DUMMY_PASSWORD_FOR_TIMING = "R21-D8-dummy-password-never-used-for-real-auth";
 
+    /**
+     * Matrice des transitions administratives autorisées (décision R21-RD,
+     * D2), indexée par statut <b>cible</b> → ensemble des statuts
+     * <b>source</b> depuis lesquels cette cible est atteignable. N'inclut
+     * jamais une cible identique à une source (le cas « statut déjà
+     * appliqué » est l'idempotence de D3, traitée séparément, avant toute
+     * consultation de cette matrice). Les 5 transitions de D2 sont
+     * exactement représentées : ACTIVE→LOCKED, ACTIVE→DISABLED,
+     * LOCKED→ACTIVE, LOCKED→DISABLED, DISABLED→ACTIVE.
+     * {@code DISABLED -> LOCKED} est délibérément absente (interdite,
+     * D2) : {@code DISABLED} n'apparaît pas dans l'ensemble des sources
+     * autorisées pour la cible {@code LOCKED} ci-dessous.
+     */
+    private static final Map<AccountStatus, Set<AccountStatus>> ALLOWED_SOURCE_STATUSES_BY_TARGET = Map.of(
+            AccountStatus.LOCKED, Set.of(AccountStatus.ACTIVE),
+            AccountStatus.DISABLED, Set.of(AccountStatus.ACTIVE, AccountStatus.LOCKED),
+            AccountStatus.ACTIVE, Set.of(AccountStatus.LOCKED, AccountStatus.DISABLED)
+    );
+
     private final AuthAccountRepository authAccountRepository;
     private final RoleRepository roleRepository;
+    private final RefreshTokenService refreshTokenService;
+    private final AccountStatusChangeRepository accountStatusChangeRepository;
     private final PasswordEncoder passwordEncoder;
     private final Clock clock;
     private final Duration failureWindow;
+    private final EntityManager entityManager;
 
     /**
      * Hash BCrypt factice (décision R21-D.8, constat D4-04/R21-D.4 — oracle de
@@ -83,10 +111,15 @@ public class AuthAccountService {
      *                      {@code refresh-token.ttl}
      */
     public AuthAccountService(AuthAccountRepository authAccountRepository, RoleRepository roleRepository,
+                               RefreshTokenService refreshTokenService,
+                               AccountStatusChangeRepository accountStatusChangeRepository,
                                PasswordEncoder passwordEncoder, Clock clock,
-                               @Value("${account-lockout.failure-window:15m}") String failureWindow) {
+                               @Value("${account-lockout.failure-window:15m}") String failureWindow,
+                               EntityManager entityManager) {
         this.authAccountRepository = authAccountRepository;
         this.roleRepository = roleRepository;
+        this.refreshTokenService = refreshTokenService;
+        this.accountStatusChangeRepository = accountStatusChangeRepository;
         this.passwordEncoder = passwordEncoder;
         this.clock = clock;
         // DurationStyle.detectAndParse comprend le format simplifie ("15m", "15s", ...)
@@ -94,6 +127,7 @@ public class AuthAccountService {
         // ambiguite de conversion @Value (meme motif que RefreshTokenService).
         this.failureWindow = DurationStyle.detectAndParse(failureWindow);
         this.dummyPasswordHash = passwordEncoder.encode(DUMMY_PASSWORD_FOR_TIMING);
+        this.entityManager = entityManager;
     }
 
     /**
@@ -166,16 +200,47 @@ public class AuthAccountService {
     }
 
     /**
-     * Recherche un compte par son identifiant.
+     * Recherche un compte par son identifiant, en vérifiant son statut.
+     *
+     * <p><strong>Vérification du statut au renouvellement (décision R21-RD,
+     * D6)</strong> : cette méthode n'a, dans tout le code source, qu'un seul
+     * appelant réel — {@code AuthController#refresh} — c'est pourquoi la
+     * vérification de statut y a été ajoutée directement (même exceptions,
+     * même mapping HTTP 423/403 que {@link #authenticate}), plutôt que dans
+     * une méthode séparée : un compte {@code LOCKED}/{@code DISABLED} ne
+     * doit plus pouvoir obtenir de nouvel Access Token via {@code /refresh}.
+     * Ce contrôle est un <b>second</b> mécanisme de défense en profondeur,
+     * distinct de la révocation de toutes les familles de refresh token
+     * opérée par {@link #changeAccountStatus} au moment de l'action
+     * administrative : il ferme spécifiquement la fenêtre de course où une
+     * nouvelle famille serait émise (via {@code /login}) juste après cette
+     * révocation, avant qu'un changement de statut ultérieur n'ait pu en
+     * tenir compte — un token présenté dans ce cas précis échouerait
+     * sinon la vérification de réutilisation de {@code RefreshTokenService#rotate}
+     * (la famille n'ayant jamais été révoquée) et atteindrait cette méthode
+     * sans être bloqué autrement. <b>Ne modifie jamais {@code
+     * AuthAccountRepository.assignRole}/{@code removeRole}</b>, qui accèdent
+     * au repository directement, sans passer par cette méthode.</p>
      *
      * @param id identifiant du compte
-     * @return le compte correspondant
+     * @return le compte correspondant, si son statut est {@link AccountStatus#ACTIVE}
      * @throws AccountNotFoundInAdminException si aucun compte ne correspond à cet identifiant
+     * @throws AccountLockedException          si le compte est {@link AccountStatus#LOCKED}
+     * @throws AccountDisabledException        si le compte est {@link AccountStatus#DISABLED}
      */
     @Transactional(readOnly = true)
     public AuthAccount findById(UUID id) {
         AuthAccount account = authAccountRepository.findById(id)
                 .orElseThrow(() -> new AccountNotFoundInAdminException("Compte introuvable"));
+
+        switch (account.getStatus()) {
+            case LOCKED -> throw new AccountLockedException("Compte verrouille");
+            case DISABLED -> throw new AccountDisabledException("Compte desactive");
+            case ACTIVE -> {
+                // Renouvellement autorise.
+            }
+        }
+
         // Meme necessite que dans authenticate(...) : roles/permissions (LAZY) doivent
         // etre initialisees pendant que la session est active, l'appelant (ex. le flux
         // refresh d'AuthController) appelant toUserContext(...) hors de cette transaction.
@@ -396,5 +461,127 @@ public class AuthAccountService {
         if (!removed) {
             throw new RoleNotAssignedException("Ce role n'est pas attribue a ce compte");
         }
+    }
+
+    /**
+     * Applique une transition administrative du statut d'un compte
+     * (décision R21-RD) : {@code /api/v1/admin/accounts/{accountId}/status}.
+     *
+     * <p><strong>Idempotence (D3)</strong> : si le compte possède déjà le
+     * statut demandé, retour immédiat sans aucune écriture (ni changement de
+     * statut, ni révocation, ni événement d'audit) — y compris sous
+     * concurrence, voir ci-dessous.</p>
+     *
+     * <p><strong>Concurrence (D2/D3)</strong> : la transition elle-même est
+     * appliquée par {@link AuthAccountRepository#transitionStatusIfAllowed},
+     * un <b>unique</b> {@code UPDATE} conditionnel encodant directement la
+     * matrice {@link #ALLOWED_SOURCE_STATUSES_BY_TARGET} dans sa clause
+     * {@code WHERE} — aucune transition interdite ne peut donc jamais être
+     * appliquée, même sous accès concurrent. Si cet {@code UPDATE} n'affecte
+     * aucune ligne, l'état réel est relu via {@link EntityManager#refresh}
+     * (jamais un second {@code findById}, voir ci-dessous) : soit un autre
+     * thread a entre-temps appliqué exactement cette même transition (traité
+     * comme un succès idempotent, sans nouvel audit ni nouvelle révocation),
+     * soit la transition demandée n'est plus valide depuis ce nouvel état réel
+     * (exception).</p>
+     *
+     * <p><strong>Piège du cache de premier niveau (L1) Hibernate</strong> :
+     * {@code account} est déjà géré par le contexte de persistance de cette
+     * transaction depuis le {@code findById} initial ci-dessous. Un second
+     * appel à {@code authAccountRepository.findById(accountId)} après un
+     * {@code UPDATE} natif n'émettrait <b>aucune</b> requête SQL — Hibernate
+     * renverrait directement l'instance déjà en cache (donc l'état
+     * <em>avant</em> l'{@code UPDATE}), quel que soit l'état réellement commité
+     * entre-temps par un autre thread. C'est pourquoi la relecture ci-dessous
+     * utilise {@link EntityManager#refresh}, qui force une véritable requête
+     * SQL et écrase l'état de l'entité déjà gérée.</p>
+     *
+     * <p><strong>Atomicité (D7)</strong> : {@code AuthAccountRepository},
+     * {@code RefreshTokenRepository} et {@code AccountStatusChangeRepository}
+     * partagent tous la même base {@code authentication_db} — cette méthode
+     * et {@link RefreshTokenService#revokeAllForAccount} (propagation
+     * {@code REQUIRED} par défaut) s'exécutent donc dans une <b>unique</b>
+     * transaction réelle : le changement de statut, la révocation de toutes
+     * les familles de refresh token actives, et l'écriture de l'événement
+     * d'audit sont validés ou annulés ensemble, sans simulation ni
+     * approximation.</p>
+     *
+     * <p><strong>Access Tokens déjà émis (D6)</strong> : cette méthode ne
+     * modifie ni ne révoque jamais un Access Token JWT déjà délivré — {@link
+     * com.tontiflow.infrastructure.security.jwt.AccessTokenService#validate}
+     * reste purement cryptographique (signature + expiration), sans accès à
+     * la base. Un Access Token émis avant cette transition reste donc valide
+     * jusqu'à son expiration naturelle ({@code jwt.access-token-ttl},
+     * 15 minutes par défaut) — cette méthode ne prétend à aucune
+     * invalidation immédiate de ces tokens.</p>
+     *
+     * @param accountId      compte ciblé
+     * @param targetStatus   statut demandé
+     * @param reason         motif de la transition (jamais persisté ailleurs que dans
+     *                       l'événement d'audit, jamais journalisé, jamais renvoyé)
+     * @param actorAccountId identifiant de l'administrateur acteur, dérivé du contexte
+     *                       d'authentification vérifié (JWT) — jamais fourni par le client
+     * @return le compte ciblé — dans le cas d'une transition réellement appliquée par
+     *         cet appel (chemin {@code updated != 0}), l'entité gérée n'est <b>pas</b>
+     *         rafraîchie après l'{@code UPDATE} natif : ne pas se fier à
+     *         {@link AuthAccount#getStatus()} sur la valeur retournée dans ce cas précis,
+     *         l'appelant connaît déjà le nouveau statut ({@code targetStatus} lui-même).
+     *         Dans le cas idempotent détecté après course ({@code updated == 0}), l'entité
+     *         retournée a été explicitement rafraîchie ({@link EntityManager#refresh}) et
+     *         son statut est donc fiable. {@link AuthAccount#getId()}/{@link AuthAccount#getEmail()}
+     *         sont, dans tous les cas, garantis à jour (jamais modifiés par cette méthode).
+     * @throws AccountNotFoundInAdminException          si {@code accountId} n'existe pas
+     * @throws InvalidAccountStatusTransitionException  si la transition n'est pas autorisée
+     *                                                   depuis le statut actuel réel du compte
+     */
+    @Transactional
+    public AuthAccount changeAccountStatus(UUID accountId, AccountStatus targetStatus, String reason, UUID actorAccountId) {
+        AuthAccount account = authAccountRepository.findById(accountId)
+                .orElseThrow(() -> new AccountNotFoundInAdminException("Compte introuvable"));
+
+        AccountStatus currentStatus = account.getStatus();
+        if (currentStatus == targetStatus) {
+            // Idempotence (D3) : aucune ecriture, aucun audit, aucune revocation.
+            return account;
+        }
+
+        Set<AccountStatus> allowedSources = ALLOWED_SOURCE_STATUSES_BY_TARGET.get(targetStatus);
+        if (!allowedSources.contains(currentStatus)) {
+            throw new InvalidAccountStatusTransitionException(
+                    "Transition " + currentStatus + " -> " + targetStatus + " non autorisee");
+        }
+
+        List<String> allowedSourceNames = allowedSources.stream().map(Enum::name).toList();
+        int updated = authAccountRepository.transitionStatusIfAllowed(accountId, targetStatus.name(), allowedSourceNames);
+
+        if (updated == 0) {
+            // Course perdue entre la lecture ci-dessus et l'UPDATE : un autre thread a
+            // deja modifie ce compte entre-temps. On relit l'etat reel pour determiner
+            // si la transition demandee est desormais idempotente (un autre thread a
+            // applique exactement la meme transition) ou toujours invalide.
+            //
+            // entityManager.refresh (et non un second findById) : account est deja gere
+            // par le contexte de persistance de cette transaction depuis le findById
+            // initial ci-dessus - un second findById renverrait l'instance DEJA EN CACHE
+            // (donc l'etat AVANT l'UPDATE natif, qui ne passe jamais par le cache L1),
+            // quel que soit l'etat reellement commite entre-temps par le thread gagnant.
+            // refresh() force une veritable requete SQL et ecrase l'etat en place.
+            entityManager.refresh(account);
+            if (account.getStatus() == targetStatus) {
+                return account;
+            }
+            throw new InvalidAccountStatusTransitionException(
+                    "Transition " + account.getStatus() + " -> " + targetStatus + " non autorisee");
+        }
+
+        // Meme transaction (voir javadoc ci-dessus) : revocation de toutes les familles
+        // actives du compte, puis ecriture de l'evenement d'audit.
+        refreshTokenService.revokeAllForAccount(accountId);
+
+        AccountStatusChange event = new AccountStatusChange(
+                accountId, actorAccountId, currentStatus, targetStatus, reason, clock.instant());
+        accountStatusChangeRepository.save(event);
+
+        return account;
     }
 }

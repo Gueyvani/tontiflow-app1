@@ -152,6 +152,28 @@ public class RefreshTokenService {
         refreshTokenRepository.revokeFamily(presented.getFamilyId(), clock.instant());
     }
 
+    /**
+     * Révoque toutes les familles de rotation encore actives d'un compte
+     * (décision R21-RD, D6), appelée par {@code AuthAccountService#changeAccountStatus}
+     * lors d'un changement administratif effectif de statut — dans la
+     * <b>même</b> transaction que la mise à jour du statut et l'écriture de
+     * l'événement d'audit (les deux services partagent la même base
+     * {@code authentication_db} : propagation {@code REQUIRED} par défaut,
+     * cette méthode rejoint la transaction déjà ouverte par l'appelant,
+     * aucune transaction séparée n'est créée).
+     *
+     * <p>Contrairement à {@link #revoke}, l'{@code accountId} ciblé provient
+     * ici directement de l'appelant (le compte administrativement modifié),
+     * jamais dérivé d'un token présenté par un client — cohérent avec le
+     * contexte administratif de cet appel.</p>
+     *
+     * @param accountId compte dont toutes les familles actives doivent être révoquées
+     */
+    @Transactional
+    public void revokeAllForAccount(UUID accountId) {
+        refreshTokenRepository.revokeAllActiveForAccount(accountId, clock.instant());
+    }
+
     private RefreshToken createAndPersist(UUID accountId, UUID familyId) {
         String rawToken = generateRawToken();
         Instant now = clock.instant();

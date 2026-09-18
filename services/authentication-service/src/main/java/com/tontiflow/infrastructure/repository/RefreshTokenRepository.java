@@ -57,4 +57,28 @@ public interface RefreshTokenRepository extends JpaRepository<RefreshToken, UUID
               AND revoked_at IS NULL
             """, nativeQuery = true)
     int consumeIfActive(@Param("id") UUID id, @Param("now") Instant now);
+
+    /**
+     * Révoque en masse <b>toutes</b> les familles de rotation encore actives
+     * d'un compte (décision R21-RD, D6) — contrairement à {@link #revokeFamily},
+     * qui ne cible qu'une seule famille (celle dérivée d'un token présenté),
+     * cette méthode cible directement {@code account_id} : nécessaire car
+     * {@code RefreshTokenService#issue} ouvre une nouvelle famille à chaque
+     * émission — un compte peut donc posséder plusieurs familles actives
+     * simultanément (plusieurs appareils/sessions). Utilise l'index déjà
+     * présent {@code idx_refresh_token_account_id} (migration V3, prévu dès
+     * l'origine pour d'éventuelles « recherches/purges par compte »).
+     *
+     * @param accountId compte dont toutes les familles actives doivent être révoquées
+     * @param revokedAt horodatage de révocation à appliquer (horloge injectée, jamais {@code Instant.now()})
+     * @return le nombre de tokens effectivement révoqués par cet appel
+     */
+    @Modifying
+    @Query(value = """
+            UPDATE refresh_token
+            SET revoked_at = :revokedAt
+            WHERE account_id = :accountId
+              AND revoked_at IS NULL
+            """, nativeQuery = true)
+    int revokeAllActiveForAccount(@Param("accountId") UUID accountId, @Param("revokedAt") Instant revokedAt);
 }

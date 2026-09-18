@@ -5,16 +5,20 @@ import com.tontiflow.application.exception.AccountDisabledException;
 import com.tontiflow.application.exception.AccountLockedException;
 import com.tontiflow.application.exception.AccountNotFoundException;
 import com.tontiflow.application.exception.AccountNotFoundInAdminException;
+import com.tontiflow.application.exception.InvalidAccountStatusTransitionException;
 import com.tontiflow.application.exception.InvalidCredentialsException;
 import com.tontiflow.application.exception.RoleAlreadyAssignedException;
 import com.tontiflow.application.exception.RoleNotAssignedException;
 import com.tontiflow.application.exception.RoleNotFoundException;
 import com.tontiflow.domain.enums.AccountStatus;
+import com.tontiflow.domain.model.AccountStatusChange;
 import com.tontiflow.domain.model.AuthAccount;
 import com.tontiflow.domain.model.Permission;
 import com.tontiflow.domain.model.Role;
+import com.tontiflow.infrastructure.repository.AccountStatusChangeRepository;
 import com.tontiflow.infrastructure.repository.AuthAccountRepository;
 import com.tontiflow.infrastructure.repository.RoleRepository;
+import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -67,6 +71,15 @@ class AuthAccountServiceTest {
     @Mock
     private RoleRepository roleRepository;
 
+    @Mock
+    private RefreshTokenService refreshTokenService;
+
+    @Mock
+    private AccountStatusChangeRepository accountStatusChangeRepository;
+
+    @Mock
+    private EntityManager entityManager;
+
     private final PasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
 
     private AuthAccountService authAccountService;
@@ -77,12 +90,14 @@ class AuthAccountServiceTest {
     }
 
     private AuthAccountService newService(Clock clock, String failureWindow) {
-        return new AuthAccountService(authAccountRepository, roleRepository, passwordEncoder, clock, failureWindow);
+        return new AuthAccountService(authAccountRepository, roleRepository, refreshTokenService,
+                accountStatusChangeRepository, passwordEncoder, clock, failureWindow, entityManager);
     }
 
     /** Variante de {@link #newService} avec un encodeur injectable (décision R21-D.8, D4-04) — permet un espionnage Mockito du {@link PasswordEncoder} réel sans affecter {@link #authAccountService}. */
     private AuthAccountService newServiceWithEncoder(PasswordEncoder encoder) {
-        return new AuthAccountService(authAccountRepository, roleRepository, encoder, Clock.fixed(FIXED_NOW, ZoneOffset.UTC), "15m");
+        return new AuthAccountService(authAccountRepository, roleRepository, refreshTokenService,
+                accountStatusChangeRepository, encoder, Clock.fixed(FIXED_NOW, ZoneOffset.UTC), "15m", entityManager);
     }
 
     @Test
@@ -402,6 +417,125 @@ class AuthAccountServiceTest {
 
         assertThatThrownBy(() -> authAccountService.removeRole(accountId, UUID.randomUUID()))
                 .isInstanceOf(AccountNotFoundInAdminException.class);
+    }
+
+    // ------------------------------------------------------------------
+    // Décision R21-RD : changement administratif de statut de compte.
+    // AuthAccountRepository/RefreshTokenService/AccountStatusChangeRepository
+    // sont simulés ici (Mockito) - les preuves SQL réelles de la transition
+    // atomique (AuthAccountRepositoryTest) et de la révocation multi-familles
+    // (RefreshTokenRepositoryTest) sont apportées séparément ; la preuve sous
+    // accès CONCURRENT réel par AccountStatusConcurrencyIntegrationTest.
+    // ------------------------------------------------------------------
+
+    @Test
+    void changeAccountStatus_activeToLocked_delegatesTransitionRevocationAndAudit() {
+        AuthAccount account = accountWithId();
+        UUID actorId = UUID.randomUUID();
+        when(authAccountRepository.findById(account.getId())).thenReturn(java.util.Optional.of(account));
+        when(authAccountRepository.transitionStatusIfAllowed(eq(account.getId()), eq("LOCKED"), any())).thenReturn(1);
+
+        AuthAccount result = authAccountService.changeAccountStatus(
+                account.getId(), AccountStatus.LOCKED, "Fraude signalee", actorId);
+
+        assertThat(result).isSameAs(account);
+        verify(authAccountRepository).transitionStatusIfAllowed(account.getId(), "LOCKED", List.of("ACTIVE"));
+        verify(refreshTokenService).revokeAllForAccount(account.getId());
+
+        ArgumentCaptor<AccountStatusChange> eventCaptor = ArgumentCaptor.forClass(AccountStatusChange.class);
+        verify(accountStatusChangeRepository).save(eventCaptor.capture());
+        AccountStatusChange event = eventCaptor.getValue();
+        assertThat(event.getAccountId()).isEqualTo(account.getId());
+        assertThat(event.getActorAccountId()).isEqualTo(actorId);
+        assertThat(event.getOldStatus()).isEqualTo(AccountStatus.ACTIVE);
+        assertThat(event.getNewStatus()).isEqualTo(AccountStatus.LOCKED);
+        assertThat(event.getReason()).isEqualTo("Fraude signalee");
+    }
+
+    @Test
+    void changeAccountStatus_disabledToLocked_throwsInvalidAccountStatusTransitionException_withoutAnyWrite() {
+        // Decision R21-RD D2 : transition explicitement interdite.
+        AuthAccount account = accountWithId();
+        account.setStatus(AccountStatus.DISABLED);
+        when(authAccountRepository.findById(account.getId())).thenReturn(java.util.Optional.of(account));
+
+        assertThatThrownBy(() -> authAccountService.changeAccountStatus(
+                account.getId(), AccountStatus.LOCKED, "Motif quelconque", UUID.randomUUID()))
+                .isInstanceOf(InvalidAccountStatusTransitionException.class);
+
+        verify(authAccountRepository, never()).transitionStatusIfAllowed(any(), any(), any());
+        verify(refreshTokenService, never()).revokeAllForAccount(any());
+        verify(accountStatusChangeRepository, never()).save(any());
+    }
+
+    @Test
+    void changeAccountStatus_targetAlreadyApplied_isIdempotent_withoutAnyWrite() {
+        // Decision R21-RD D3 : idempotence, aucune ecriture, aucun audit, aucune revocation.
+        AuthAccount account = accountWithId(); // ACTIVE
+        when(authAccountRepository.findById(account.getId())).thenReturn(java.util.Optional.of(account));
+
+        AuthAccount result = authAccountService.changeAccountStatus(
+                account.getId(), AccountStatus.ACTIVE, "Motif quelconque", UUID.randomUUID());
+
+        assertThat(result).isSameAs(account);
+        verify(authAccountRepository, never()).transitionStatusIfAllowed(any(), any(), any());
+        verify(refreshTokenService, never()).revokeAllForAccount(any());
+        verify(accountStatusChangeRepository, never()).save(any());
+    }
+
+    @Test
+    void changeAccountStatus_withUnknownAccount_throwsAccountNotFoundInAdminException() {
+        UUID accountId = UUID.randomUUID();
+        when(authAccountRepository.findById(accountId)).thenReturn(java.util.Optional.empty());
+
+        assertThatThrownBy(() -> authAccountService.changeAccountStatus(
+                accountId, AccountStatus.LOCKED, "Motif quelconque", UUID.randomUUID()))
+                .isInstanceOf(AccountNotFoundInAdminException.class);
+    }
+
+    @Test
+    void changeAccountStatus_lostRaceButTargetReachedByAnotherThread_isTreatedAsIdempotentSuccess() {
+        // Course perdue (transitionStatusIfAllowed renvoie 0) mais la relecture montre
+        // qu'un autre thread a deja applique EXACTEMENT la transition demandee. La relecture
+        // passe par entityManager.refresh(account) (et non un second findById - voir javadoc
+        // de changeAccountStatus) : on simule ici l'effet reel de refresh() en mutant l'entite
+        // DEJA geree, exactement comme le ferait Hibernate en reponse a une vraie requete SQL.
+        AuthAccount account = accountWithId(); // lu ACTIVE au depart
+        when(authAccountRepository.findById(account.getId())).thenReturn(java.util.Optional.of(account));
+        when(authAccountRepository.transitionStatusIfAllowed(eq(account.getId()), eq("LOCKED"), any())).thenReturn(0);
+        org.mockito.Mockito.doAnswer(invocation -> {
+            account.setStatus(AccountStatus.LOCKED); // deja applique par un autre thread
+            return null;
+        }).when(entityManager).refresh(account);
+
+        AuthAccount result = authAccountService.changeAccountStatus(
+                account.getId(), AccountStatus.LOCKED, "Motif quelconque", UUID.randomUUID());
+
+        assertThat(result).isSameAs(account);
+        assertThat(result.getStatus()).isEqualTo(AccountStatus.LOCKED);
+        verify(refreshTokenService, never()).revokeAllForAccount(any());
+        verify(accountStatusChangeRepository, never()).save(any());
+    }
+
+    @Test
+    void changeAccountStatus_lostRaceAndStillInvalidFromRealState_throwsInvalidAccountStatusTransitionException() {
+        // Course perdue, et l'etat reel relu (via entityManager.refresh) ne correspond ni a la
+        // cible ni a une source valide pour celle-ci (ex. un autre thread a desactive le compte
+        // entre-temps).
+        AuthAccount account = accountWithId(); // lu ACTIVE au depart
+        when(authAccountRepository.findById(account.getId())).thenReturn(java.util.Optional.of(account));
+        when(authAccountRepository.transitionStatusIfAllowed(eq(account.getId()), eq("LOCKED"), any())).thenReturn(0);
+        org.mockito.Mockito.doAnswer(invocation -> {
+            account.setStatus(AccountStatus.DISABLED);
+            return null;
+        }).when(entityManager).refresh(account);
+
+        assertThatThrownBy(() -> authAccountService.changeAccountStatus(
+                account.getId(), AccountStatus.LOCKED, "Motif quelconque", UUID.randomUUID()))
+                .isInstanceOf(InvalidAccountStatusTransitionException.class);
+
+        verify(refreshTokenService, never()).revokeAllForAccount(any());
+        verify(accountStatusChangeRepository, never()).save(any());
     }
 
     private static AuthAccount accountWithId() {

@@ -8,6 +8,7 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -141,4 +142,41 @@ public interface AuthAccountRepository extends JpaRepository<AuthAccount, UUID> 
             WHERE id = :id
             """, nativeQuery = true)
     int resetFailedAttempts(@Param("id") UUID id);
+
+    /**
+     * Applique atomiquement une transition administrative de statut
+     * (décision R21-RD, D2/D7) — <b>unique</b> {@code UPDATE} conditionnel,
+     * sans lecture Java intermédiaire, garantissant qu'aucune transition
+     * interdite ne peut jamais être appliquée, même sous accès concurrent :
+     * la clause {@code WHERE status IN (...)} encode directement, pour la
+     * cible demandée, l'ensemble des statuts source autorisés par la
+     * matrice de transition (calculée côté Java dans {@code
+     * AuthAccountService#ALLOWED_SOURCE_STATUSES_BY_TARGET} et transmise
+     * ici en paramètre) — même patron que {@link #registerFailedAttempt}/
+     * {@link #resetFailedAttempts} : le verrou de ligne pris par l'{@code
+     * UPDATE} lui-même sérialise deux exécutions concurrentes sur le même
+     * {@code id} (PostgreSQL comme H2, sémantique standard READ COMMITTED).
+     *
+     * <p>Ne couvre jamais le cas où le statut actuel est déjà égal au
+     * statut cible : ce cas (idempotence, décision R21-RD, D3) est traité
+     * en amont par l'appelant, sans jamais atteindre cette méthode ni
+     * produire d'écriture.</p>
+     *
+     * @param id                     identifiant du compte
+     * @param targetStatus           nom du statut cible ({@link com.tontiflow.domain.enums.AccountStatus#name()})
+     * @param allowedSourceStatuses  noms des statuts source autorisés pour cette cible précise
+     * @return le nombre de lignes affectées (0 si le statut réel au moment de l'écriture
+     *         ne fait pas partie de {@code allowedSourceStatuses} — course perdue ou
+     *         transition réellement interdite ; l'appelant doit relire l'état réel pour
+     *         distinguer les deux cas — 1 sinon)
+     */
+    @Modifying
+    @Query(value = """
+            UPDATE auth_account
+            SET status = :targetStatus
+            WHERE id = :id
+              AND status IN (:allowedSourceStatuses)
+            """, nativeQuery = true)
+    int transitionStatusIfAllowed(@Param("id") UUID id, @Param("targetStatus") String targetStatus,
+                                   @Param("allowedSourceStatuses") List<String> allowedSourceStatuses);
 }
