@@ -174,6 +174,27 @@ public class RefreshTokenService {
         refreshTokenRepository.revokeAllActiveForAccount(accountId, clock.instant());
     }
 
+    /**
+     * Révoque une famille de rotation par son identifiant direct (décision
+     * R21-RD-FU, Option C — nettoyage complémentaire) : contrairement à
+     * {@link #revoke}, ce {@code familyId} n'est <b>pas</b> dérivé ici d'un
+     * token brut présenté par l'appelant — c'est {@code
+     * AuthController#refresh} qui le fournit, après avoir déjà établi
+     * (via {@code rotated.getFamilyId()}, obtenu d'une rotation qui vient de
+     * réussir sur le compte dont le statut est ensuite trouvé bloquant) que
+     * cette famille appartient bien au compte concerné. Réutilise {@link
+     * RefreshTokenRepository#revokeFamily} tel quel : son {@code WHERE
+     * revoked_at IS NULL} le rend intrinsèquement idempotent (appelée
+     * plusieurs fois, y compris concurremment, sans erreur ni
+     * réactivation).
+     *
+     * @param familyId lignée de rotation à révoquer entièrement
+     */
+    @Transactional
+    public void revokeFamilyById(UUID familyId) {
+        refreshTokenRepository.revokeFamily(familyId, clock.instant());
+    }
+
     private RefreshToken createAndPersist(UUID accountId, UUID familyId) {
         String rawToken = generateRawToken();
         Instant now = clock.instant();

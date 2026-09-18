@@ -334,6 +334,87 @@ class AccountStatusIntegrationTest {
         assertThat(refreshAfter.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
     }
 
+    // ------------------------------------------------------------------
+    // Decision R21-RD-FU, Option C : nettoyage complementaire au refresh.
+    // Simule directement l'etat residuel que la course (desormais fermee
+    // cote /login, voir LoginAccountStatusConcurrencyIntegrationTest) pouvait
+    // laisser : une famille active, non revoquee, pour un compte deja
+    // LOCKED/DISABLED - en ecrivant le statut directement via le repository
+    // (bypass volontaire de changeAccountStatus, qui aurait lui-meme revoque
+    // cette famille - ce n'est PAS ce que ce test veut exercer ici).
+    // ------------------------------------------------------------------
+
+    @Test
+    void refresh_rejectedForLockedAccount_explicitlyRevokesThePresentedFamily() {
+        AuthAccount target = registerAccount("astatus-target-22@tontiflow.test");
+        ResponseEntity<TokenResponse> login = restTemplate.postForEntity(
+                "/api/v1/auth/login", new LoginRequest(target.getEmail(), TEST_PASSWORD), TokenResponse.class);
+
+        // Simule l'etat residuel de la course : statut ecrit SANS passer par
+        // changeAccountStatus (qui aurait normalement revoque cette famille).
+        AuthAccount reloaded = authAccountRepository.findById(target.getId()).orElseThrow();
+        reloaded.setStatus(AccountStatus.LOCKED);
+        authAccountRepository.save(reloaded);
+
+        ResponseEntity<ErrorResponse> refreshAfter = restTemplate.postForEntity(
+                "/api/v1/auth/refresh", new RefreshTokenRequest(login.getBody().refreshToken()), ErrorResponse.class);
+
+        assertThat(refreshAfter.getStatusCode()).isEqualTo(HttpStatus.LOCKED);
+        List<com.tontiflow.domain.model.RefreshToken> families = refreshTokenRepository.findAll().stream()
+                .filter(t -> t.getAccountId().equals(target.getId()))
+                .toList();
+        assertThat(families).isNotEmpty();
+        assertThat(families).allSatisfy(t -> assertThat(t.getRevokedAt()).isNotNull());
+    }
+
+    @Test
+    void refresh_rejectedForDisabledAccount_explicitlyRevokesThePresentedFamily() {
+        AuthAccount target = registerAccount("astatus-target-23@tontiflow.test");
+        ResponseEntity<TokenResponse> login = restTemplate.postForEntity(
+                "/api/v1/auth/login", new LoginRequest(target.getEmail(), TEST_PASSWORD), TokenResponse.class);
+
+        AuthAccount reloaded = authAccountRepository.findById(target.getId()).orElseThrow();
+        reloaded.setStatus(AccountStatus.DISABLED);
+        authAccountRepository.save(reloaded);
+
+        ResponseEntity<ErrorResponse> refreshAfter = restTemplate.postForEntity(
+                "/api/v1/auth/refresh", new RefreshTokenRequest(login.getBody().refreshToken()), ErrorResponse.class);
+
+        assertThat(refreshAfter.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        List<com.tontiflow.domain.model.RefreshToken> families = refreshTokenRepository.findAll().stream()
+                .filter(t -> t.getAccountId().equals(target.getId()))
+                .toList();
+        assertThat(families).isNotEmpty();
+        assertThat(families).allSatisfy(t -> assertThat(t.getRevokedAt()).isNotNull());
+    }
+
+    @Test
+    void refresh_rejectedForLockedAccount_neverRevokesAnotherAccountsFamily() {
+        AuthAccount target = registerAccount("astatus-target-24@tontiflow.test");
+        AuthAccount other = registerAccount("astatus-other-24@tontiflow.test");
+        ResponseEntity<TokenResponse> targetLogin = restTemplate.postForEntity(
+                "/api/v1/auth/login", new LoginRequest(target.getEmail(), TEST_PASSWORD), TokenResponse.class);
+        ResponseEntity<TokenResponse> otherLogin = restTemplate.postForEntity(
+                "/api/v1/auth/login", new LoginRequest(other.getEmail(), TEST_PASSWORD), TokenResponse.class);
+
+        AuthAccount reloaded = authAccountRepository.findById(target.getId()).orElseThrow();
+        reloaded.setStatus(AccountStatus.LOCKED);
+        authAccountRepository.save(reloaded);
+
+        restTemplate.postForEntity(
+                "/api/v1/auth/refresh", new RefreshTokenRequest(targetLogin.getBody().refreshToken()), ErrorResponse.class);
+
+        List<com.tontiflow.domain.model.RefreshToken> otherFamilies = refreshTokenRepository.findAll().stream()
+                .filter(t -> t.getAccountId().equals(other.getId()))
+                .toList();
+        assertThat(otherFamilies).isNotEmpty();
+        assertThat(otherFamilies).allSatisfy(t -> assertThat(t.getRevokedAt()).isNull()); // jamais touchee
+        // Sanite : le token de l'autre compte reste utilisable.
+        ResponseEntity<TokenResponse> otherRefresh = restTemplate.postForEntity(
+                "/api/v1/auth/refresh", new RefreshTokenRequest(otherLogin.getBody().refreshToken()), TokenResponse.class);
+        assertThat(otherRefresh.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
     @Test
     void refresh_beforeAnyStatusChange_stillSucceeds_nonRegression() {
         AuthAccount target = registerAccount("astatus-target-17@tontiflow.test");

@@ -1,6 +1,8 @@
 package com.tontiflow.interfaces.rest;
 
 import com.tontiflow.UserContext;
+import com.tontiflow.application.exception.AccountDisabledException;
+import com.tontiflow.application.exception.AccountLockedException;
 import com.tontiflow.application.service.AuthAccountService;
 import com.tontiflow.application.service.RefreshTokenService;
 import com.tontiflow.domain.model.AuthAccount;
@@ -87,18 +89,24 @@ public class AuthController {
      * Authentifie un compte et émet un Access Token JWT accompagné d'un
      * Refresh Token (nouvelle famille de rotation).
      *
+     * <p><strong>Décision R21-RD-FU</strong> : authentification et émission
+     * du Refresh Token sont désormais réalisées par un <b>unique</b> appel à
+     * {@link AuthAccountService#login} (une seule transaction, verrou de
+     * ligne) — voir sa javadoc pour la fenêtre de course ainsi fermée.
+     * {@code refreshTokenService.issue(...)} n'est plus appelé directement
+     * depuis ce contrôleur pour {@code /login}.</p>
+     *
      * @param request email + mot de passe fournis pour la tentative
      * @return {@code 200 OK} avec les tokens émis
      */
     @PostMapping("/login")
     public ResponseEntity<TokenResponse> login(@Valid @RequestBody LoginRequest request) {
-        AuthAccount account = authAccountService.authenticate(request.email(), request.password());
-        UserContext context = authAccountService.toUserContext(account);
+        AuthAccountService.LoginResult result = authAccountService.login(request.email(), request.password());
+        UserContext context = authAccountService.toUserContext(result.account());
         String accessToken = accessTokenService.generate(context);
-        RefreshToken refreshToken = refreshTokenService.issue(account.getId());
 
         TokenResponse response = new TokenResponse(
-                accessToken, "Bearer", jwtProperties.accessTokenTtl().toSeconds(), refreshToken.getRawToken());
+                accessToken, "Bearer", jwtProperties.accessTokenTtl().toSeconds(), result.refreshToken().getRawToken());
         return ResponseEntity.ok(response);
     }
 
@@ -107,13 +115,30 @@ public class AuthController {
      * tourner le Refresh Token (usage unique) et émet un nouvel Access Token
      * reflétant les rôles/permissions actuels du compte.
      *
+     * <p><strong>Nettoyage complémentaire (décision R21-RD-FU, Option C)</strong> :
+     * si {@link AuthAccountService#findById} rejette ce renouvellement parce
+     * que le compte est {@code LOCKED}/{@code DISABLED}, la famille que
+     * {@code rotate()} vient de relancer juste au-dessus est explicitement
+     * révoquée avant de propager l'erreur — {@code rotated.getAccountId()}
+     * est exactement le compte dont le statut vient d'être vérifié, jamais
+     * celui d'un autre compte. Ce token n'a de toute façon jamais quitté ce
+     * serveur (la réponse HTTP n'est jamais construite sur ce chemin) : cette
+     * révocation ferme uniquement la trace résiduelle laissée en base, sans
+     * changer le code HTTP retourné à l'appelant.</p>
+     *
      * @param request Refresh Token brut précédemment émis
      * @return {@code 200 OK} avec les nouveaux tokens
      */
     @PostMapping("/refresh")
     public ResponseEntity<TokenResponse> refresh(@Valid @RequestBody RefreshTokenRequest request) {
         RefreshToken rotated = refreshTokenService.rotate(request.refreshToken());
-        AuthAccount account = authAccountService.findById(rotated.getAccountId());
+        AuthAccount account;
+        try {
+            account = authAccountService.findById(rotated.getAccountId());
+        } catch (AccountLockedException | AccountDisabledException blocked) {
+            refreshTokenService.revokeFamilyById(rotated.getFamilyId());
+            throw blocked;
+        }
         UserContext context = authAccountService.toUserContext(account);
         String accessToken = accessTokenService.generate(context);
 

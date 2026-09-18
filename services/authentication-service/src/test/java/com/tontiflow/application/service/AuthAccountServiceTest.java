@@ -261,6 +261,79 @@ class AuthAccountServiceTest {
     }
 
     // ------------------------------------------------------------------
+    // Décision R21-RD-FU : authentification et émission du Refresh Token
+    // dans une unique transaction (corrige la fenêtre de course avec
+    // changeAccountStatus documentée à la clôture de R21-RD). Le verrou de
+    // ligne lui-même (EntityManager#lock) n'est pas reproductible avec un
+    // EntityManager simulé (Mockito ne peut pas exécuter de SQL) - la preuve
+    // SQL réelle est apportée séparément par un test de concurrence dédié
+    // (threads réels, H2). Ces tests unitaires vérifient la DÉLÉGATION
+    // correcte : verrou+relecture systématiquement effectués avant toute
+    // décision, jamais de statut Java périmé utilisé, refus propre sans
+    // émission si le statut relu est bloquant.
+    // ------------------------------------------------------------------
+
+    @Test
+    void login_withActiveAccount_locksRefreshesAndIssuesRefreshToken() {
+        AuthAccount account = activeAccount("login-active@tontiflow.test", TEST_PASSWORD);
+        when(authAccountRepository.findByEmail("login-active@tontiflow.test")).thenReturn(Optional.of(account));
+        com.tontiflow.domain.model.RefreshToken issued = new com.tontiflow.domain.model.RefreshToken();
+        when(refreshTokenService.issue(account.getId())).thenReturn(issued);
+
+        AuthAccountService.LoginResult result = authAccountService.login("login-active@tontiflow.test", TEST_PASSWORD);
+
+        assertThat(result.account()).isSameAs(account);
+        assertThat(result.refreshToken()).isSameAs(issued);
+        verify(entityManager).lock(account, jakarta.persistence.LockModeType.PESSIMISTIC_WRITE);
+        verify(entityManager).refresh(account);
+        verify(refreshTokenService).issue(account.getId());
+    }
+
+    @Test
+    void login_withLockedAccountFromTheStart_throwsWithoutIssuingRefreshToken() {
+        AuthAccount account = accountWithStatus("login-locked@tontiflow.test", TEST_PASSWORD, AccountStatus.LOCKED);
+        when(authAccountRepository.findByEmail("login-locked@tontiflow.test")).thenReturn(Optional.of(account));
+
+        assertThatThrownBy(() -> authAccountService.login("login-locked@tontiflow.test", TEST_PASSWORD))
+                .isInstanceOf(AccountLockedException.class);
+
+        verify(refreshTokenService, never()).issue(any());
+    }
+
+    @Test
+    void login_withDisabledAccountFromTheStart_throwsWithoutIssuingRefreshToken() {
+        AuthAccount account = accountWithStatus("login-disabled@tontiflow.test", TEST_PASSWORD, AccountStatus.DISABLED);
+        when(authAccountRepository.findByEmail("login-disabled@tontiflow.test")).thenReturn(Optional.of(account));
+
+        assertThatThrownBy(() -> authAccountService.login("login-disabled@tontiflow.test", TEST_PASSWORD))
+                .isInstanceOf(AccountDisabledException.class);
+
+        verify(refreshTokenService, never()).issue(any());
+    }
+
+    @Test
+    void login_statusBecomesLockedBetweenInitialReadAndLockedRefresh_rejectsWithoutIssuingRefreshToken() {
+        // Simule la course fermee par R21-RD-FU : authenticateInternal lit ACTIVE (aucune
+        // ecriture concurrente encore visible a cet instant), mais la relecture forcee
+        // apres acquisition du verrou (entityManager.refresh) revele LOCKED - exactement
+        // ce qu'un vrai changeAccountStatus concurrent aurait commis entre-temps. Le champ
+        // Java potentiellement perime lu par authenticateInternal ne doit JAMAIS etre celui
+        // qui tranche la decision finale.
+        AuthAccount account = activeAccount("login-race@tontiflow.test", TEST_PASSWORD);
+        when(authAccountRepository.findByEmail("login-race@tontiflow.test")).thenReturn(Optional.of(account));
+        org.mockito.Mockito.doAnswer(invocation -> {
+            account.setStatus(AccountStatus.LOCKED); // "commite" par un autre thread pendant le verrou
+            return null;
+        }).when(entityManager).refresh(account);
+
+        assertThatThrownBy(() -> authAccountService.login("login-race@tontiflow.test", TEST_PASSWORD))
+                .isInstanceOf(AccountLockedException.class);
+
+        verify(entityManager).lock(account, jakarta.persistence.LockModeType.PESSIMISTIC_WRITE);
+        verify(refreshTokenService, never()).issue(any());
+    }
+
+    // ------------------------------------------------------------------
     // Décision R21-D.5 : ralentissement progressif, remplace le verrouillage
     // dur de R21-D.3 (corrige le déni de service par verrouillage, constat
     // D4-01/R21-D.4). Le comptage / la fenêtre / la table de délai sont

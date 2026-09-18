@@ -14,11 +14,13 @@ import com.tontiflow.domain.enums.AccountStatus;
 import com.tontiflow.domain.model.AccountStatusChange;
 import com.tontiflow.domain.model.AuthAccount;
 import com.tontiflow.domain.model.Permission;
+import com.tontiflow.domain.model.RefreshToken;
 import com.tontiflow.domain.model.Role;
 import com.tontiflow.infrastructure.repository.AccountStatusChangeRepository;
 import com.tontiflow.infrastructure.repository.AuthAccountRepository;
 import com.tontiflow.infrastructure.repository.RoleRepository;
 import jakarta.persistence.EntityManager;
+import jakarta.persistence.LockModeType;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.convert.DurationStyle;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -306,6 +308,29 @@ public class AuthAccountService {
     // InvalidCredentialsException est levee juste apres, videant le ralentissement de tout effet.
     @Transactional(noRollbackFor = InvalidCredentialsException.class)
     public AuthAccount authenticate(String email, String rawPassword) {
+        return authenticateInternal(email, rawPassword);
+    }
+
+    /**
+     * Corps réel de {@link #authenticate}, extrait en méthode privée
+     * <b>non</b> {@code @Transactional} (décision R21-RD-FU) : {@link #login}
+     * a besoin d'exécuter cette même logique <b>dans sa propre transaction</b>
+     * (pour y ajouter ensuite, dans la même transaction, le verrou de ligne et
+     * l'émission du Refresh Token — voir {@link #login}). Un appel direct de
+     * {@code login()} vers la méthode publique {@code authenticate()} (les
+     * deux dans la même classe) serait une <b>auto-invocation Spring</b> :
+     * l'appel `this.authenticate(...)` ne passerait pas par le proxy AOP, et
+     * l'annotation {@code @Transactional(noRollbackFor = ...)} de {@code
+     * authenticate()} serait silencieusement ignorée — seule celle de la
+     * méthode proxee appelée <b>depuis l'extérieur</b> ({@code login()} elle-même)
+     * s'appliquerait alors, ce qui aurait annulé par erreur l'écriture de
+     * {@link AuthAccountRepository#registerFailedAttempt} en cas de mot de
+     * passe incorrect. En extrayant la logique dans cette méthode privée sans
+     * annotation propre, {@code authenticate()} et {@code login()} restent
+     * chacune un point d'entrée transactionnel unique et correctement configuré,
+     * sans dépendre d'un appel implicite au proxy de l'autre.
+     */
+    private AuthAccount authenticateInternal(String email, String rawPassword) {
         Optional<AuthAccount> maybeAccount = authAccountRepository.findByEmail(email);
         if (maybeAccount.isEmpty()) {
             // Oracle de timing (decision R21-D.8, constat D4-04/R21-D.4) : meme cout BCrypt
@@ -371,6 +396,104 @@ public class AuthAccountService {
                 now.plus(DELAY_AT_THREE_FAILURES), now.plus(DELAY_AT_FOUR_FAILURES),
                 now.plus(DELAY_AT_FIVE_FAILURES), now.plus(DELAY_AT_SIX_OR_MORE_FAILURES));
         throw new InvalidCredentialsException("Mot de passe incorrect");
+    }
+
+    /**
+     * Résultat de {@link #login} : le compte authentifié et la nouvelle
+     * famille de Refresh Token émise, tous deux produits par la <b>même</b>
+     * transaction.
+     */
+    public record LoginResult(AuthAccount account, RefreshToken refreshToken) {
+    }
+
+    /**
+     * Authentifie un compte <b>et</b> émet sa nouvelle famille de Refresh
+     * Token, dans une <b>unique</b> transaction (décision R21-RD-FU, corrige
+     * la fenêtre de course documentée à la clôture de R21-RD : {@code
+     * AuthController#login} appelait auparavant {@link #authenticate} puis
+     * {@code RefreshTokenService#issue} dans deux transactions séparées, sans
+     * aucune revérification du statut entre les deux — un changement
+     * administratif de statut pouvant s'intercaler entre les deux et révoquer
+     * toutes les familles existantes <b>avant</b> que celle-ci n'existe
+     * encore, la laissant orpheline, non révoquée).
+     *
+     * <p><strong>Verrou de ligne et relecture forcée</strong> : après
+     * authentification réussie ({@link #authenticateInternal}, dont la
+     * propre vérification de statut reste une première passe non-autoritaire
+     * — voir ci-dessous), cette méthode acquiert explicitement un verrou
+     * {@link LockModeType#PESSIMISTIC_WRITE} sur la ligne {@code auth_account}
+     * concernée, <b>puis</b> force une relecture réelle ({@link
+     * EntityManager#refresh}) avant de trancher — jamais en se fiant au champ
+     * Java {@code account.getStatus()} tel que lu par {@code
+     * authenticateInternal} <b>avant</b> l'acquisition de ce verrou (même
+     * piège de péremption que celui déjà corrigé dans {@link
+     * #changeAccountStatus} : un verrou seul n'actualise pas nécessairement,
+     * selon le fournisseur JPA, les champs d'une entité déjà gérée dans le
+     * contexte de persistance — {@code refresh()} après {@code lock()} est la
+     * seule garantie non ambiguë).</p>
+     *
+     * <p><strong>Sérialisation réelle avec {@link #changeAccountStatus}</strong> :
+     * {@link AuthAccountRepository#transitionStatusIfAllowed} est un {@code
+     * UPDATE} qui prend lui-même un verrou exclusif sur cette même ligne le
+     * temps de sa transaction. Les deux ordres de concurrence possibles sont
+     * donc tous deux sûrs : si <b>ce</b> verrou est acquis en premier, la
+     * nouvelle famille de Refresh Token est déjà committée avant que la
+     * révocation administrative ne s'exécute, et sera donc rattrapée par
+     * elle ; si le verrou de {@code changeAccountStatus} est acquis en
+     * premier, cette méthode bloque jusqu'à son commit, puis relit
+     * nécessairement le statut à jour (LOCKED/DISABLED) et rejette avant
+     * toute émission. Aucune fenêtre ne subsiste entre la vérification et
+     * l'émission — contrairement à l'ancien enchaînement en deux
+     * transactions séparées.</p>
+     *
+     * <p><strong>Auto-invocation évitée</strong> : voir javadoc de {@link
+     * #authenticateInternal}.</p>
+     *
+     * <p><strong>Limite de preuve</strong> : le verrouillage de ligne
+     * (`SELECT ... FOR UPDATE`) est une primitive SQL standard, supportée
+     * aussi bien par H2 (tests) que PostgreSQL (production) — mais, comme
+     * pour tous les tests de concurrence de ce dépôt, l'exécution réelle
+     * n'est prouvée que sous H2 ; la garantie sous PostgreSQL réel reste une
+     * inférence fondée sur la sémantique standard READ COMMITTED partagée
+     * par les deux moteurs, non une preuve d'exécution directe.</p>
+     *
+     * @param email       email du compte
+     * @param rawPassword mot de passe en clair fourni pour la tentative
+     * @return le compte authentifié et sa nouvelle famille de Refresh Token
+     * @throws AccountNotFoundException    si aucun compte ne correspond à l'email
+     * @throws InvalidCredentialsException si le mot de passe ne correspond pas
+     * @throws AccountLockedException      si le compte est {@link AccountStatus#LOCKED}
+     *                                      (détecté par {@code authenticateInternal} ou,
+     *                                      sous course, par la relecture verrouillée ci-dessous)
+     * @throws AccountDisabledException    si le compte est {@link AccountStatus#DISABLED}
+     *                                      (même remarque)
+     */
+    @Transactional(noRollbackFor = InvalidCredentialsException.class)
+    public LoginResult login(String email, String rawPassword) {
+        AuthAccount account = authenticateInternal(email, rawPassword);
+
+        entityManager.lock(account, LockModeType.PESSIMISTIC_WRITE);
+        // entityManager.refresh() recharge TOUTES les colonnes/associations depuis la base,
+        // y compris les collections LAZY roles/permissions deja initialisees par
+        // authenticateInternal() ci-dessus : il les remet a l'etat de proxy NON initialise
+        // (nouvelle instance de collection persistante Hibernate). Sans la reinitialisation
+        // ci-dessous, toUserContext(...) - appele plus tard hors de cette transaction par
+        // AuthController - leverait LazyInitializationException. Reinitialiser apres refresh
+        // est donc necessaire, pas redondant, malgre l'appel deja fait dans authenticateInternal.
+        entityManager.refresh(account);
+
+        switch (account.getStatus()) {
+            case LOCKED -> throw new AccountLockedException("Compte verrouille");
+            case DISABLED -> throw new AccountDisabledException("Compte desactive");
+            case ACTIVE -> {
+                // Emission autorisee.
+            }
+        }
+
+        initializeRolesAndPermissions(account);
+
+        RefreshToken refreshToken = refreshTokenService.issue(account.getId());
+        return new LoginResult(account, refreshToken);
     }
 
     private static void initializeRolesAndPermissions(AuthAccount account) {
