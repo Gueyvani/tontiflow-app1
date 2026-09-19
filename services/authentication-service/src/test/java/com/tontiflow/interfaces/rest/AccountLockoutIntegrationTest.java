@@ -1,6 +1,8 @@
 package com.tontiflow.interfaces.rest;
 
+import com.tontiflow.application.service.AuthAccountService;
 import com.tontiflow.core.dto.ErrorResponse;
+import com.tontiflow.domain.enums.AccountStatus;
 import com.tontiflow.domain.model.AuthAccount;
 import com.tontiflow.infrastructure.repository.AuthAccountRepository;
 import com.tontiflow.infrastructure.security.jwt.JwtTestSecurityConfiguration;
@@ -17,6 +19,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.ActiveProfiles;
 
 import java.time.Instant;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -48,6 +51,66 @@ class AccountLockoutIntegrationTest {
 
     @Autowired
     private AuthAccountRepository authAccountRepository;
+
+    @Autowired
+    private AuthAccountService authAccountService;
+
+    // ------------------------------------------------------------------
+    // Decision TICKET-1 (audit post-R21-RD-FU, constat A1) : le mot de passe
+    // correct doit toujours remettre a zero le ralentissement progressif
+    // (failed_attempts/nextAttemptAllowedAt), meme si l'authentification est
+    // ensuite rejetee pour statut LOCKED/DISABLED - resetFailedAttempts() ne
+    // doit jamais etre annule par le rollback declenche par ces exceptions.
+    // ------------------------------------------------------------------
+
+    @Test
+    void login_withCorrectPasswordOnLockedAccount_rejectsButStillResetsBackoff() {
+        String email = "lockout-http-locked@tontiflow.test";
+        register(email, TEST_PASSWORD);
+        AuthAccount account = authAccountRepository.findByEmail(email).orElseThrow();
+
+        // 2 echecs prealables (palier "aucun delai", pour ne pas interferer avec ce test).
+        loginExpectingError(email, WRONG_PASSWORD);
+        loginExpectingError(email, WRONG_PASSWORD);
+        AuthAccount beforeLock = authAccountRepository.findByEmail(email).orElseThrow();
+        assertThat(beforeLock.getFailedAttempts()).isEqualTo(2);
+
+        authAccountService.changeAccountStatus(account.getId(), AccountStatus.LOCKED, "Test TICKET-1", UUID.randomUUID());
+
+        ResponseEntity<ErrorResponse> rejected = loginExpectingError(email, TEST_PASSWORD);
+
+        assertThat(rejected.getStatusCode()).isEqualTo(HttpStatus.LOCKED);
+        assertThat(rejected.getBody()).isNotNull();
+        assertThat(rejected.getBody().detail()).isEqualTo("Account locked");
+
+        AuthAccount afterRejection = authAccountRepository.findByEmail(email).orElseThrow();
+        assertThat(afterRejection.getFailedAttempts()).isZero();
+        assertThat(afterRejection.getNextAttemptAllowedAt()).isNull();
+    }
+
+    @Test
+    void login_withCorrectPasswordOnDisabledAccount_rejectsButStillResetsBackoff() {
+        String email = "lockout-http-disabled@tontiflow.test";
+        register(email, TEST_PASSWORD);
+        AuthAccount account = authAccountRepository.findByEmail(email).orElseThrow();
+
+        loginExpectingError(email, WRONG_PASSWORD);
+        loginExpectingError(email, WRONG_PASSWORD);
+        AuthAccount beforeDisable = authAccountRepository.findByEmail(email).orElseThrow();
+        assertThat(beforeDisable.getFailedAttempts()).isEqualTo(2);
+
+        authAccountService.changeAccountStatus(account.getId(), AccountStatus.DISABLED, "Test TICKET-1", UUID.randomUUID());
+
+        ResponseEntity<ErrorResponse> rejected = loginExpectingError(email, TEST_PASSWORD);
+
+        assertThat(rejected.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(rejected.getBody()).isNotNull();
+        assertThat(rejected.getBody().detail()).isEqualTo("Account disabled");
+
+        AuthAccount afterRejection = authAccountRepository.findByEmail(email).orElseThrow();
+        assertThat(afterRejection.getFailedAttempts()).isZero();
+        assertThat(afterRejection.getNextAttemptAllowedAt()).isNull();
+    }
 
     @Test
     void login_after6RapidFailedAttempts_correctPasswordStillSucceedsImmediately_provingNoAccountLockoutDos() {

@@ -306,7 +306,12 @@ public class AuthAccountService {
     // sans cela, l'enregistrement de l'echec (compteur, delai) serait annule par le
     // rollback par defaut de Spring sur RuntimeException au moment meme ou
     // InvalidCredentialsException est levee juste apres, videant le ralentissement de tout effet.
-    @Transactional(noRollbackFor = InvalidCredentialsException.class)
+    // AccountLockedException/AccountDisabledException (decision TICKET-1, audit post-R21-RD-FU,
+    // constat A1) : meme necessite symetrique sur le CHEMIN MOT DE PASSE CORRECT - sans ceci,
+    // resetFailedAttempts() (ligne ci-dessous) serait lui aussi annule par le rollback par
+    // defaut au moment ou l'un de ces deux statuts bloquants est detecte juste apres, alors
+    // que le mot de passe presente etait pourtant correct.
+    @Transactional(noRollbackFor = {InvalidCredentialsException.class, AccountLockedException.class, AccountDisabledException.class})
     public AuthAccount authenticate(String email, String rawPassword) {
         return authenticateInternal(email, rawPassword);
     }
@@ -468,7 +473,12 @@ public class AuthAccountService {
      * @throws AccountDisabledException    si le compte est {@link AccountStatus#DISABLED}
      *                                      (même remarque)
      */
-    @Transactional(noRollbackFor = InvalidCredentialsException.class)
+    // noRollbackFor (decision TICKET-1, audit post-R21-RD-FU, constat A1) : meme necessite
+    // qu'authenticate() ci-dessus - authenticateInternal() (appelee juste en dessous) execute
+    // resetFailedAttempts() sur le chemin mot de passe correct AVANT que le statut bloquant ne
+    // soit detecte (ici ou, sous course, apres le verrou/relecture plus bas) ; sans ceci, cette
+    // ecriture deja validee cote SQL serait annulee par le rollback par defaut de Spring.
+    @Transactional(noRollbackFor = {InvalidCredentialsException.class, AccountLockedException.class, AccountDisabledException.class})
     public LoginResult login(String email, String rawPassword) {
         AuthAccount account = authenticateInternal(email, rawPassword);
 
