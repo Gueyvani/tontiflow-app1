@@ -147,4 +147,85 @@ class RefreshTokenConcurrencyIntegrationTest {
         assertThat(originalAReloaded.getRevokedAt()).isNotNull();
         assertThat(originalBReloaded.getRevokedAt()).isNotNull();
     }
+
+    // ------------------------------------------------------------------
+    // Decision TICKET-3 (preuve de concurrence de revokeFamilyById, decision
+    // R21-RD-FU Option C) - meme patron que rotate_tenConcurrentRequestsWithSameToken
+    // ci-dessus : vrais threads, vraies transactions Spring separees (chaque
+    // thread appelle refreshTokenService, bean proxy Spring, depuis l'exterieur -
+    // jamais une auto-invocation), H2 reel. revokeFamily (JPQL, WHERE
+    // revoked_at IS NULL) ne retourne aucun compte de lignes affectees
+    // (contrairement a consumeIfActive/revokeAllActiveForAccount) : les
+    // assertions portent donc uniquement sur l'etat final relu en base, jamais
+    // sur une valeur exacte de revokedAt (le Clock reel du service n'est pas
+    // fige ici, et le WHERE guard ne garantit pas lequel des deux threads
+    // ecrit effectivement la ligne).
+    // ------------------------------------------------------------------
+
+    @Test
+    void revokeFamilyById_twoConcurrentRevocationsOnSameFamily_isIdempotent_familyEndsUpRevoked() throws Exception {
+        UUID accountId = UUID.randomUUID();
+        RefreshToken issued = refreshTokenService.issue(accountId);
+        UUID familyId = issued.getFamilyId();
+
+        // Verifie avant concurrence que la famille est bien active.
+        RefreshToken beforeConcurrency = refreshTokenRepository.findById(issued.getId()).orElseThrow();
+        assertThat(beforeConcurrency.getRevokedAt()).isNull();
+
+        int threadCount = 2;
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+        CountDownLatch readyLatch = new CountDownLatch(threadCount);
+        CountDownLatch startLatch = new CountDownLatch(1);
+        AtomicInteger unexpectedCount = new AtomicInteger();
+
+        // Deux taches, chacune appelant refreshTokenService.revokeFamilyById(familyId) depuis
+        // un thread distinct : chaque appel traverse le proxy Spring @Transactional du bean
+        // injecte, donc chaque thread ouvre reellement SA PROPRE transaction (pas d'auto-
+        // invocation, pas de transaction partagee entre les deux appels).
+        List<Callable<Void>> tasks = IntStream.range(0, threadCount)
+                .<Callable<Void>>mapToObj(i -> () -> {
+                    readyLatch.countDown();
+                    startLatch.await(5, TimeUnit.SECONDS);
+                    try {
+                        refreshTokenService.revokeFamilyById(familyId);
+                    } catch (Exception unexpected) {
+                        unexpectedCount.incrementAndGet();
+                    }
+                    return null;
+                })
+                .toList();
+
+        List<Future<Void>> futures = executor.invokeAll(tasks);
+        readyLatch.await(5, TimeUnit.SECONDS);
+        startLatch.countDown();
+        for (Future<Void> future : futures) {
+            future.get(10, TimeUnit.SECONDS); // aucune exception INATTENDUE ne doit fuiter du Callable lui-meme
+        }
+        executor.shutdown();
+
+        assertThat(unexpectedCount.get()).isZero();
+
+        // Apres les deux revocations concurrentes : la famille existe toujours, revoquee,
+        // plus aucune ligne active pour cette lignee.
+        List<RefreshToken> familyRows = refreshTokenRepository.findAll().stream()
+                .filter(t -> t.getFamilyId().equals(familyId))
+                .toList();
+        assertThat(familyRows).isNotEmpty();
+        assertThat(familyRows).allSatisfy(t -> assertThat(t.getRevokedAt()).isNotNull());
+        List<RefreshToken> stillActive = familyRows.stream()
+                .filter(t -> t.getRevokedAt() == null)
+                .toList();
+        assertThat(stillActive).isEmpty();
+
+        // Troisieme revocation, SEQUENTIELLE (depuis le thread principal, apres les deux
+        // premieres) : doit rester idempotente, sans exception, sans reactiver quoi que ce
+        // soit (revokeFamily exclut deja toute ligne dont revoked_at n'est plus null).
+        org.assertj.core.api.Assertions.assertThatCode(() -> refreshTokenService.revokeFamilyById(familyId))
+                .doesNotThrowAnyException();
+
+        List<RefreshToken> afterThirdCall = refreshTokenRepository.findAll().stream()
+                .filter(t -> t.getFamilyId().equals(familyId))
+                .toList();
+        assertThat(afterThirdCall).allSatisfy(t -> assertThat(t.getRevokedAt()).isNotNull());
+    }
 }
