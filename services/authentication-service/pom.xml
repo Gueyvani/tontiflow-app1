@@ -14,6 +14,21 @@
 
 	<name>TontiFlow :: Services :: Authentication Service</name>
 
+	<!-- TICKET-3 (test uniquement) : le BOM Spring Boot 3.3.13 gere Testcontainers 1.19.8 (docker-java
+	     3.3.6), dont les requetes sont rejetees (HTTP 400) par Docker Engine 29 / Docker Desktop
+	     recent. Surcharge limitee a ce module ; aucune incidence sur le code de production. -->
+	<dependencyManagement>
+		<dependencies>
+			<dependency>
+				<groupId>org.testcontainers</groupId>
+				<artifactId>testcontainers-bom</artifactId>
+				<version>1.21.4</version>
+				<type>pom</type>
+				<scope>import</scope>
+			</dependency>
+		</dependencies>
+	</dependencyManagement>
+
 	<dependencies>
 
 		<dependency>
@@ -24,6 +39,19 @@
 		<dependency>
 			<groupId>com.h2database</groupId>
 			<artifactId>h2</artifactId>
+			<scope>test</scope>
+		</dependency>
+
+		<!-- TICKET-3 : preuve de contention de verrou sur un vrai PostgreSQL (postgres:16-alpine,
+		     identique a la production). Versions gerees par le BOM Spring Boot ; test uniquement. -->
+		<dependency>
+			<groupId>org.testcontainers</groupId>
+			<artifactId>postgresql</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.testcontainers</groupId>
+			<artifactId>junit-jupiter</artifactId>
 			<scope>test</scope>
 		</dependency>
 
@@ -91,7 +119,41 @@
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
 			</plugin>
+
+			<!-- TICKET-3 : les tests PostgreSQL/Testcontainers (*PostgresIntegrationTest) exigent Docker.
+			     Ils sont exclus du build standard (./mvnw clean verify fonctionne sans Docker) et ne
+			     sont executes que via le profil "postgres-integration" (voir ci-dessous). -->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<configuration>
+					<excludes>
+						<exclude>**/*PostgresIntegrationTest.java</exclude>
+					</excludes>
+				</configuration>
+			</plugin>
 		</plugins>
 	</build>
+
+	<profiles>
+		<!-- Validation PostgreSQL reelle (Testcontainers, postgres:16-alpine, Flyway V1..V5) :
+		         ./mvnw -pl services/authentication-service -Ppostgres-integration test
+		     Ce profil retire l'exclusion : les tests PostgreSQL sont alors executes en plus des
+		     autres tests du module. Docker est requis ; sans Docker ils ECHOUENT (jamais ignores). -->
+		<profile>
+			<id>postgres-integration</id>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-surefire-plugin</artifactId>
+						<configuration>
+							<excludes combine.self="override"/>
+						</configuration>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+	</profiles>
 
 </project>
