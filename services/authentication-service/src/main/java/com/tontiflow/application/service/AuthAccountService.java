@@ -21,6 +21,8 @@ import com.tontiflow.infrastructure.repository.AuthAccountRepository;
 import com.tontiflow.infrastructure.repository.RoleRepository;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.convert.DurationStyle;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -35,6 +37,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
@@ -49,6 +52,30 @@ import java.util.stream.Collectors;
  */
 @Service
 public class AuthAccountService {
+
+    private static final Logger log = LoggerFactory.getLogger(AuthAccountService.class);
+
+    /**
+     * Seuil d'observabilité (décision TICKET-2, Option 1) au-delà duquel
+     * l'acquisition effective du verrou de ligne {@code auth_account} par
+     * {@link #login} est journalisée en WARN ({@code login_lock_contention}).
+     * Une acquisition sans contention prend quelques millisecondes ; 200 ms est
+     * deux ordres de grandeur au-dessus (aucun faux positif dû au jitter
+     * ordinaire) tout en signalant une contention réelle bien avant qu'elle ne
+     * soit visible côté client. Constante fixe, non configurable.
+     */
+    private static final long LOGIN_LOCK_CONTENTION_THRESHOLD_MILLIS = 200;
+
+    /**
+     * Résultat interne de {@link #authenticateInternal} : le compte authentifié
+     * et la durée (ns) de {@code resetFailedAttempts} — un {@code UPDATE} sur la
+     * ligne {@code auth_account}, donc la <b>première</b> instruction qui prend
+     * (ou attend) le verrou de ligne sur le chemin « mot de passe correct »
+     * (constat empirique TICKET-2 : c'est elle, et non {@code lock()}, qui est
+     * bloquée par une transaction concurrente détenant la ligne).
+     */
+    private record AuthenticationOutcome(AuthAccount account, long resetWaitNanos) {
+    }
 
     /** Table de délai fixe (décision R21-D.5, non configurable) — voir {@link AuthAccountRepository#registerFailedAttempt}. */
     private static final Duration DELAY_AT_THREE_FAILURES = Duration.ofSeconds(2);
@@ -313,7 +340,7 @@ public class AuthAccountService {
     // que le mot de passe presente etait pourtant correct.
     @Transactional(noRollbackFor = {InvalidCredentialsException.class, AccountLockedException.class, AccountDisabledException.class})
     public AuthAccount authenticate(String email, String rawPassword) {
-        return authenticateInternal(email, rawPassword);
+        return authenticateInternal(email, rawPassword).account();
     }
 
     /**
@@ -335,7 +362,7 @@ public class AuthAccountService {
      * chacune un point d'entrée transactionnel unique et correctement configuré,
      * sans dépendre d'un appel implicite au proxy de l'autre.
      */
-    private AuthAccount authenticateInternal(String email, String rawPassword) {
+    private AuthenticationOutcome authenticateInternal(String email, String rawPassword) {
         Optional<AuthAccount> maybeAccount = authAccountRepository.findByEmail(email);
         if (maybeAccount.isEmpty()) {
             // Oracle de timing (decision R21-D.8, constat D4-04/R21-D.4) : meme cout BCrypt
@@ -367,7 +394,9 @@ public class AuthAccountService {
             // colonnes de l'entite (email/password_hash/status compris, non concernees par
             // ce reset). Inconditionnelle en temps (pas de WHERE sur locked_until), pour
             // que le mot de passe correct reste toujours accepte immediatement.
+            long resetStartNanos = System.nanoTime();
             authAccountRepository.resetFailedAttempts(account.getId());
+            long resetWaitNanos = System.nanoTime() - resetStartNanos;
 
             switch (account.getStatus()) {
                 case LOCKED -> throw new AccountLockedException("Compte verrouille");
@@ -385,7 +414,7 @@ public class AuthAccountService {
             // frontiere transactionnelle (qui reste dans ce service, pas dans le controleur).
             initializeRolesAndPermissions(account);
 
-            return account;
+            return new AuthenticationOutcome(account, resetWaitNanos);
         }
 
         // Mot de passe incorrect : enregistrement du ralentissement delegue a un UNIQUE
@@ -462,6 +491,16 @@ public class AuthAccountService {
      * inférence fondée sur la sémantique standard READ COMMITTED partagée
      * par les deux moteurs, non une preuve d'exécution directe.</p>
      *
+     * <p><strong>Observabilité de la contention (décision TICKET-2, Option 1)</strong> :
+     * sur le chemin « mot de passe correct », la contention sur la ligne {@code
+     * auth_account} est attendue par {@code resetFailedAttempts} (un {@code UPDATE},
+     * exécuté avant {@code lock()}) et non par {@code lock()} lui-même. La durée de
+     * ces deux appels est donc additionnée ({@code System.nanoTime()}) et, si elle
+     * atteint {@link #LOGIN_LOCK_CONTENTION_THRESHOLD_MILLIS}, un unique WARN
+     * {@code login_lock_contention} est journalisé (durée et identifiant technique
+     * du compte uniquement — jamais de mot de passe, hash, JWT, Refresh Token ni
+     * email). Aucune logique métier n'est modifiée.</p>
+     *
      * @param email       email du compte
      * @param rawPassword mot de passe en clair fourni pour la tentative
      * @return le compte authentifié et sa nouvelle famille de Refresh Token
@@ -480,9 +519,20 @@ public class AuthAccountService {
     // ecriture deja validee cote SQL serait annulee par le rollback par defaut de Spring.
     @Transactional(noRollbackFor = {InvalidCredentialsException.class, AccountLockedException.class, AccountDisabledException.class})
     public LoginResult login(String email, String rawPassword) {
-        AuthAccount account = authenticateInternal(email, rawPassword);
+        AuthenticationOutcome outcome = authenticateInternal(email, rawPassword);
+        AuthAccount account = outcome.account();
 
+        // Observabilite (decision TICKET-2, Option 1) : acquisition EFFECTIVE du verrou de
+        // ligne = resetFailedAttempts (UPDATE, mesure dans authenticateInternal) + lock() ci-dessous.
+        // Ni BCrypt, ni refresh(), ni initialisation des roles, ni emission du token.
+        long lockStartNanos = System.nanoTime();
         entityManager.lock(account, LockModeType.PESSIMISTIC_WRITE);
+        long lockAcquisitionMillis = TimeUnit.NANOSECONDS.toMillis(
+                outcome.resetWaitNanos() + (System.nanoTime() - lockStartNanos));
+        if (lockAcquisitionMillis >= LOGIN_LOCK_CONTENTION_THRESHOLD_MILLIS) {
+            log.warn("login_lock_contention : attente d'acquisition du verrou de compte {} ms (seuil {} ms), accountId={}",
+                    lockAcquisitionMillis, LOGIN_LOCK_CONTENTION_THRESHOLD_MILLIS, account.getId());
+        }
         // entityManager.refresh() recharge TOUTES les colonnes/associations depuis la base,
         // y compris les collections LAZY roles/permissions deja initialisees par
         // authenticateInternal() ci-dessus : il les remet a l'etat de proxy NON initialise
