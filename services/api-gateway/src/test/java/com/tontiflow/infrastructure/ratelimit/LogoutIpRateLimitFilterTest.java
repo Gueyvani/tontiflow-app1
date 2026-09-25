@@ -213,4 +213,66 @@ class LogoutIpRateLimitFilterTest {
 
         assertThat(passesThrough(logout("10.0.4.12"))).isTrue();
     }
+
+    // ------------------------------------------------------------------
+    // TICKET-5 (F-7) : variantes percent-encodees du chemin (memes segments que
+    // Spring Security / Gateway). Les requetes utilisent URI.create : le helper
+    // MockServerHttpRequest.method(method, "<template>") reencoderait % en %25.
+    // ------------------------------------------------------------------
+
+    private static final String CANONICAL_PATH = "/api/v1/auth/logout";
+    private static final String[] ENCODED_VARIANTS = {"/api/v1/auth/logou%74", "/api/v1/auth/%6Cogout"};
+
+    private static MockServerWebExchange encodedRequest(HttpMethod method, String rawPath, String ip) {
+        java.net.URI uri = java.net.URI.create(rawPath);
+        assertThat(uri.getRawPath()).isEqualTo(rawPath);
+        return MockServerWebExchange.from(
+                MockServerHttpRequest.method(method, uri)
+                        .remoteAddress(new InetSocketAddress(ip, 40000))
+                        .build());
+    }
+
+    @Test
+    void encodedVariants_shareTheCanonicalQuota() {
+        String ip = "10.20.6.1";
+        // Le quota est consomme alternativement par le chemin canonique et ses variantes encodees.
+        for (int i = 0; i < LOGOUT_LIMIT; i++) {
+            String path = (i % (ENCODED_VARIANTS.length + 1) == 0)
+                    ? CANONICAL_PATH : ENCODED_VARIANTS[(i - 1) % ENCODED_VARIANTS.length];
+            assertThat(passesThrough(encodedRequest(HttpMethod.POST, path, ip))).as(path).isTrue();
+        }
+
+        // Quota epuise : le canonique ET chaque variante sont refuses, avec le meme compteur.
+        assertThat(passesThrough(encodedRequest(HttpMethod.POST, CANONICAL_PATH, ip))).isFalse();
+        for (String variant : ENCODED_VARIANTS) {
+            MockServerWebExchange exchange = encodedRequest(HttpMethod.POST, variant, ip);
+            assertThat(passesThrough(exchange)).as(variant).isFalse();
+            assertThat(exchange.getResponse().getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+        }
+        // Avec slash final, toujours le meme compteur (contrat historique conserve).
+        assertThat(passesThrough(encodedRequest(HttpMethod.POST, ENCODED_VARIANTS[0] + "/", ip))).isFalse();
+    }
+
+    @Test
+    void encodedVariantsAlone_exhaustTheQuota_withoutAnyCanonicalRequest() {
+        String ip = "10.20.6.2";
+        for (int i = 0; i < LOGOUT_LIMIT; i++) {
+            assertThat(passesThrough(encodedRequest(HttpMethod.POST, ENCODED_VARIANTS[i % ENCODED_VARIANTS.length], ip))).isTrue();
+        }
+        assertThat(passesThrough(encodedRequest(HttpMethod.POST, CANONICAL_PATH, ip))).isFalse();
+    }
+
+    @Test
+    void encodedNeighborPath_isNeverLimited() {
+        for (int i = 0; i < LOGOUT_LIMIT + 5; i++) {
+            assertThat(passesThrough(encodedRequest(HttpMethod.POST, "/api/v1/auth/logou%74x", "10.20.6.4"))).isTrue();
+        }
+    }
+
+    @Test
+    void encodedVariant_withNonPostMethod_isNeverLimited() {
+        for (int i = 0; i < LOGOUT_LIMIT + 5; i++) {
+            assertThat(passesThrough(encodedRequest(HttpMethod.GET, ENCODED_VARIANTS[0], "10.20.6.3"))).isTrue();
+        }
+    }
 }

@@ -27,7 +27,6 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.LongSupplier;
-import java.util.regex.Pattern;
 
 /**
  * Rate limiting <b>IP, local et in-JVM</b>, spécifique aux endpoints
@@ -61,7 +60,7 @@ import java.util.regex.Pattern;
  * ({@code {roleId}}, {@code {permissionId}}, {@code {accountId}}) — <b>toutes
  * les méthodes HTTP</b> sont couvertes, sans restriction. Le quota est
  * <b>unique par IP</b> et partagé entre tous les endpoints d'administration
- * (pas un quota par endpoint) : ancrage regex sur le préfixe uniquement.</p>
+ * (pas un quota par endpoint) : ancrage sur le préfixe uniquement (PathPattern, TICKET-5).</p>
  *
  * <p>Fenêtre glissante d'une minute par IP source, résolue par
  * {@link ClientIpResolver} (pair TCP par défaut ; {@code X-Forwarded-For}
@@ -103,13 +102,14 @@ import java.util.regex.Pattern;
 public class AdminIpRateLimitFilter implements GlobalFilter, Ordered {
 
     /**
-     * Ancré sur le préfixe {@code /api/v1/admin} suivi soit de la fin de
+     * PathPattern {@code /api/v1/admin/**} (chemin décodé segment par segment, comme Security) :
+     * ancré sur le préfixe {@code /api/v1/admin} suivi soit de la fin de
      * chaîne, soit d'un {@code /} et de tout le reste (segments variables
      * inclus) — ne matche jamais un chemin dont le segment suivant
      * "admin" n'est pas exactement {@code /} ou la fin (ex. exclut
      * {@code /api/v1/administration}).
      */
-    private static final Pattern ADMIN_PATH_PREFIX = Pattern.compile("^/api/v1/admin(/.*)?$");
+    private static final RequestPathMatcher ADMIN_PATH_PREFIX = RequestPathMatcher.of("/api/v1/admin/**");
     private static final long WINDOW_MILLIS = 60_000L;
     private static final String CORRELATION_ID_HEADER = "X-Correlation-ID";
     /** Purge paresseuse : balaie la table toutes les N requêtes admin filtrées. */
@@ -176,7 +176,7 @@ public class AdminIpRateLimitFilter implements GlobalFilter, Ordered {
         // Aucune restriction de methode HTTP : toutes (GET/POST/PUT/DELETE/...) sont
         // couvertes des lors que le chemin correspond au prefixe d'administration
         // (decision R21-RC, Phase B, Decision 1).
-        return ADMIN_PATH_PREFIX.matcher(request.getURI().getRawPath()).matches();
+        return ADMIN_PATH_PREFIX.matches(request);
     }
 
     private Mono<Void> writeTooManyRequests(ServerWebExchange exchange, long retryAfterSeconds) {

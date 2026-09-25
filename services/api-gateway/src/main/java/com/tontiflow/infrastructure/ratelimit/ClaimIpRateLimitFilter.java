@@ -28,7 +28,6 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.LongSupplier;
-import java.util.regex.Pattern;
 
 /**
  * Rate limiting <b>IP, local et in-JVM</b>, spécifique à l'unique endpoint
@@ -62,8 +61,8 @@ import java.util.regex.Pattern;
 @Component
 public class ClaimIpRateLimitFilter implements GlobalFilter, Ordered {
 
-    private static final Pattern CLAIM_PATH =
-            Pattern.compile("^/api/v1/tontines/[^/]+/members/claim/?$");
+    private static final RequestPathMatcher CLAIM_PATH =
+            RequestPathMatcher.exactWithOptionalTrailingSlash("/api/v1/tontines/{tontineId}/members/claim");
     private static final long WINDOW_MILLIS = 60_000L;
     private static final String CORRELATION_ID_HEADER = "X-Correlation-ID";
     /** Purge paresseuse : balaie la table toutes les N requêtes claim filtrées. */
@@ -126,7 +125,7 @@ public class ClaimIpRateLimitFilter implements GlobalFilter, Ordered {
 
     private static boolean isClaimPost(ServerHttpRequest request) {
         return HttpMethod.POST.equals(request.getMethod())
-                && CLAIM_PATH.matcher(request.getURI().getRawPath()).matches();
+                && CLAIM_PATH.matches(request);
     }
 
     private Mono<Void> writeTooManyRequests(ServerWebExchange exchange, long retryAfterSeconds) {

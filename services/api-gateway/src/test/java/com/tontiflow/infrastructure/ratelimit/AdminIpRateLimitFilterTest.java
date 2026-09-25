@@ -323,4 +323,59 @@ class AdminIpRateLimitFilterTest {
         assertThat(allowed.get()).isEqualTo(limit);
         assertThat(rejected.get()).isEqualTo(threads - limit);
     }
+
+    // ------------------------------------------------------------------
+    // TICKET-5 (F-7) : variantes percent-encodees du chemin (memes segments que
+    // Spring Security / Gateway). Les requetes utilisent URI.create : le helper
+    // MockServerHttpRequest.method(method, "<template>") reencoderait % en %25.
+    // ------------------------------------------------------------------
+
+    private static final String CANONICAL_PATH = "/api/v1/admin/roles";
+    private static final String[] ENCODED_VARIANTS = {"/api/v1/adm%69n/roles", "/api/v1/%61dmin/roles", "/api/v1/admin/%72oles", "/api/v1/adm%69n"};
+
+    private static MockServerWebExchange encodedRequest(HttpMethod method, String rawPath, String ip) {
+        java.net.URI uri = java.net.URI.create(rawPath);
+        assertThat(uri.getRawPath()).isEqualTo(rawPath);
+        return MockServerWebExchange.from(
+                MockServerHttpRequest.method(method, uri)
+                        .remoteAddress(new InetSocketAddress(ip, 40000))
+                        .build());
+    }
+
+    @Test
+    void encodedVariants_shareTheCanonicalQuota() {
+        String ip = "10.20.5.1";
+        // Le quota est consomme alternativement par le chemin canonique et ses variantes encodees.
+        for (int i = 0; i < ADMIN_LIMIT; i++) {
+            String path = (i % (ENCODED_VARIANTS.length + 1) == 0)
+                    ? CANONICAL_PATH : ENCODED_VARIANTS[(i - 1) % ENCODED_VARIANTS.length];
+            assertThat(passesThrough(encodedRequest(HttpMethod.GET, path, ip))).as(path).isTrue();
+        }
+
+        // Quota epuise : le canonique ET chaque variante sont refuses, avec le meme compteur.
+        assertThat(passesThrough(encodedRequest(HttpMethod.GET, CANONICAL_PATH, ip))).isFalse();
+        for (String variant : ENCODED_VARIANTS) {
+            MockServerWebExchange exchange = encodedRequest(HttpMethod.GET, variant, ip);
+            assertThat(passesThrough(exchange)).as(variant).isFalse();
+            assertThat(exchange.getResponse().getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+        }
+        // Avec slash final, toujours le meme compteur (contrat historique conserve).
+        assertThat(passesThrough(encodedRequest(HttpMethod.GET, ENCODED_VARIANTS[0] + "/", ip))).isFalse();
+    }
+
+    @Test
+    void encodedVariantsAlone_exhaustTheQuota_withoutAnyCanonicalRequest() {
+        String ip = "10.20.5.2";
+        for (int i = 0; i < ADMIN_LIMIT; i++) {
+            assertThat(passesThrough(encodedRequest(HttpMethod.GET, ENCODED_VARIANTS[i % ENCODED_VARIANTS.length], ip))).isTrue();
+        }
+        assertThat(passesThrough(encodedRequest(HttpMethod.GET, CANONICAL_PATH, ip))).isFalse();
+    }
+
+    @Test
+    void encodedNeighborPath_isNeverLimited() {
+        for (int i = 0; i < ADMIN_LIMIT + 5; i++) {
+            assertThat(passesThrough(encodedRequest(HttpMethod.GET, "/api/v1/adm%69nistration/x", "10.20.5.4"))).isTrue();
+        }
+    }
 }

@@ -28,7 +28,6 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.LongSupplier;
-import java.util.regex.Pattern;
 
 /**
  * Rate limiting <b>IP, local et in-JVM</b>, spécifique à l'endpoint de
@@ -76,7 +75,8 @@ import java.util.regex.Pattern;
 @Component
 public class RefreshIpRateLimitFilter implements GlobalFilter, Ordered {
 
-    private static final Pattern REFRESH_PATH = Pattern.compile("^/api/v1/auth/refresh/?$");
+    private static final RequestPathMatcher REFRESH_PATH =
+            RequestPathMatcher.exactWithOptionalTrailingSlash("/api/v1/auth/refresh");
     private static final long WINDOW_MILLIS = 60_000L;
     private static final String CORRELATION_ID_HEADER = "X-Correlation-ID";
     /** Purge paresseuse : balaie la table toutes les N requêtes refresh filtrées. */
@@ -139,7 +139,7 @@ public class RefreshIpRateLimitFilter implements GlobalFilter, Ordered {
 
     private static boolean isRefreshPost(ServerHttpRequest request) {
         return HttpMethod.POST.equals(request.getMethod())
-                && REFRESH_PATH.matcher(request.getURI().getRawPath()).matches();
+                && REFRESH_PATH.matches(request);
     }
 
     private Mono<Void> writeTooManyRequests(ServerWebExchange exchange, long retryAfterSeconds) {
