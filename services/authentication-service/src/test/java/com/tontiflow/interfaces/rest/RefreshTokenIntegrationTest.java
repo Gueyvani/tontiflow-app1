@@ -12,6 +12,8 @@ import com.tontiflow.interfaces.rest.dto.LoginRequest;
 import com.tontiflow.interfaces.rest.dto.RefreshTokenRequest;
 import com.tontiflow.interfaces.rest.dto.RegisterRequest;
 import com.tontiflow.interfaces.rest.dto.TokenResponse;
+import com.tontiflow.security.jwt.JwtClaimNames;
+import io.jsonwebtoken.Jwts;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -51,6 +53,9 @@ class RefreshTokenIntegrationTest {
 
     @Autowired
     private AccessTokenService accessTokenService;
+
+    @Autowired
+    private java.security.KeyPair jwtTestKeyPair;
 
     @Test
     void login_returnsNonBlankRefreshToken() {
@@ -233,6 +238,48 @@ class RefreshTokenIntegrationTest {
         ResponseEntity<Void> response = doLogout(loginResponse.refreshToken());
 
         assertThat(response.getStatusCode()).isNotEqualTo(HttpStatus.UNAUTHORIZED);
+    }
+
+    // TICKET-4 (constat F-1) : logout doit fonctionner avec un Access Token EXPIRE - le refresh token
+    // du corps est le seul credential. Independant du Gateway : la requete atteint authentication-service
+    // (permitAll), le JwtAuthenticationFilter n'authentifie pas le Bearer expire mais laisse passer, et la
+    // famille de refresh tokens est revoquee.
+    @Test
+    void logout_withExpiredAccessToken_isAcceptedAndRevokesRefreshFamily() {
+        String email = "logout-expired-access@tontiflow.test";
+        TokenResponse loginResponse = login(email);
+        String refreshToken = loginResponse.refreshToken();
+        java.util.UUID accountId = authAccountRepository.findByEmail(email).orElseThrow().getId();
+
+        String expiredAccessToken = Jwts.builder()
+                .claim(JwtClaimNames.SUBJECT, accountId.toString())
+                .claim(JwtClaimNames.ISSUED_AT, java.util.Date.from(Instant.now().minusSeconds(3600)))
+                .claim(JwtClaimNames.EXPIRATION, java.util.Date.from(Instant.now().minusSeconds(60)))
+                .claim(JwtClaimNames.JWT_ID, java.util.UUID.randomUUID().toString())
+                .claim(JwtClaimNames.ISSUER, "authentication-service")
+                .claim(JwtClaimNames.USERNAME, email)
+                .claim(JwtClaimNames.EMAIL, email)
+                .claim(JwtClaimNames.ROLES, java.util.List.of())
+                .claim(JwtClaimNames.PERMISSIONS, java.util.List.of())
+                .signWith(jwtTestKeyPair.getPrivate(), Jwts.SIG.RS256)
+                .compact();
+        org.springframework.http.HttpHeaders headers = new org.springframework.http.HttpHeaders();
+        headers.setBearerAuth(expiredAccessToken);
+
+        ResponseEntity<Void> logout = restTemplate.exchange("/api/v1/auth/logout",
+                org.springframework.http.HttpMethod.POST,
+                new org.springframework.http.HttpEntity<>(new RefreshTokenRequest(refreshToken), headers),
+                Void.class);
+
+        assertThat(logout.getStatusCode()).isEqualTo(HttpStatus.OK);
+        // Famille revoquee : plus aucune ligne active pour ce compte, et le refresh est rejete.
+        assertThat(refreshTokenRepository.findAll().stream()
+                .filter(t -> t.getAccountId().equals(accountId)))
+                .isNotEmpty()
+                .allSatisfy(t -> assertThat(t.getRevokedAt()).isNotNull());
+        ResponseEntity<ErrorResponse> refreshAfter = restTemplate.postForEntity(
+                "/api/v1/auth/refresh", new RefreshTokenRequest(refreshToken), ErrorResponse.class);
+        assertThat(refreshAfter.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
     }
 
     private ResponseEntity<Void> doLogout(String refreshToken) {

@@ -85,6 +85,50 @@ class SecurityConfigIntegrationTest {
                 .expectStatus().value(status -> assertThat(status).isNotEqualTo(HttpStatus.UNAUTHORIZED.value()));
     }
 
+    // --- TICKET-4 (constat F-1) : POST /api/v1/auth/logout public, exactement cette route/methode ---
+
+    @Test
+    void logout_withoutToken_isNotRejectedByGatewaySecurity() {
+        webTestClient.post().uri("/api/v1/auth/logout")
+                .exchange()
+                .expectStatus().value(status -> assertThat(status).isNotEqualTo(HttpStatus.UNAUTHORIZED.value()));
+    }
+
+    @Test
+    void logout_withExpiredToken_isNotRejectedByGatewaySecurity() {
+        String expiredToken = buildToken(Instant.now().minus(1, ChronoUnit.MINUTES));
+
+        webTestClient.post().uri("/api/v1/auth/logout")
+                .header("Authorization", "Bearer " + expiredToken)
+                .exchange()
+                .expectStatus().value(status -> assertThat(status).isNotEqualTo(HttpStatus.UNAUTHORIZED.value()));
+    }
+
+    @Test
+    void logout_withValidToken_isNotRejectedByGatewaySecurity() {
+        String validToken = buildToken(Instant.now().plus(15, ChronoUnit.MINUTES));
+
+        webTestClient.post().uri("/api/v1/auth/logout")
+                .header("Authorization", "Bearer " + validToken)
+                .exchange()
+                .expectStatus().value(status -> assertThat(status).isNotEqualTo(HttpStatus.UNAUTHORIZED.value()));
+    }
+
+    @Test
+    void logout_nonPostMethods_remainProtected() {
+        webTestClient.get().uri("/api/v1/auth/logout").exchange().expectStatus().isUnauthorized();
+        webTestClient.put().uri("/api/v1/auth/logout").exchange().expectStatus().isUnauthorized();
+        webTestClient.patch().uri("/api/v1/auth/logout").exchange().expectStatus().isUnauthorized();
+        webTestClient.delete().uri("/api/v1/auth/logout").exchange().expectStatus().isUnauthorized();
+    }
+
+    @Test
+    void otherAuthRoutes_remainProtected_authNamespaceIsNotGloballyPublic() {
+        webTestClient.post().uri("/api/v1/auth/logout-all").exchange().expectStatus().isUnauthorized();
+        webTestClient.post().uri("/api/v1/auth/sessions").exchange().expectStatus().isUnauthorized();
+        webTestClient.get().uri("/api/v1/auth/anything").exchange().expectStatus().isUnauthorized();
+    }
+
     @Test
     void protectedRoute_withoutToken_isRejectedWithUnauthorized() {
         webTestClient.get().uri("/api/v1/tontines/anything")

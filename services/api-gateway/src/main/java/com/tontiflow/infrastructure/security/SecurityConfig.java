@@ -6,6 +6,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
 import org.springframework.core.io.Resource;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.config.annotation.web.reactive.EnableWebFluxSecurity;
 import org.springframework.security.config.web.server.SecurityWebFiltersOrder;
@@ -47,6 +48,13 @@ public class SecurityConfig {
                 .formLogin(ServerHttpSecurity.FormLoginSpec::disable)
                 .authorizeExchange(exchange -> exchange
                         .pathMatchers("/api/v1/auth/register", "/api/v1/auth/login", "/api/v1/auth/refresh")
+                        .permitAll()
+                        // Decision TICKET-4 (constat F-1) : logout est public dans authentication-service
+                        // (le refresh token du corps est le credential) ; sans cette regle, un Access Token
+                        // expire (15 min) empechait de revoquer la famille de refresh tokens via le Gateway.
+                        // Strictement limite a POST + chemin exact : aucune autre methode, aucune autre route
+                        // /api/v1/auth/** n'est rendue publique. Debit borne par LogoutIpRateLimitFilter.
+                        .pathMatchers(HttpMethod.POST, "/api/v1/auth/logout")
                         .permitAll()
                         // /actuator/health public (decision R11, corrections techniques) : une
                         // sonde d'orchestration (Docker/K8s) ne peut pas fournir de JWT. Perimetre

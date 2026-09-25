@@ -78,6 +78,23 @@ refresh-ip-rate-limit:
   refresh-per-minute: ${REFRESH_IP_RATE_LIMIT_REFRESH_PER_MINUTE:30}
   trusted-proxy-count: ${REFRESH_IP_RATE_LIMIT_TRUSTED_PROXY_COUNT:0}
 
+# Rate limiting IP local (in-JVM) de POST /api/v1/auth/logout (decision TICKET-4,
+# constat F-1). Cet endpoint est public (permitAll, POST uniquement, au Gateway comme
+# dans authentication-service) : le refresh token du corps est le credential, ce qui
+# permet de revoquer une session meme apres expiration de l'Access Token. Il ne
+# devine rien (token de 256 bits, aucun BCrypt) : le risque est un debit de lectures
+# indexees en base, pas de la force brute - d'ou une limite au niveau du regime
+# "appel automatique / plusieurs utilisateurs derriere un meme NAT" de /refresh (30/min),
+# et non du regime "action humaine unique" de login/register (5/min) : un faux
+# positif empeche de revoquer une session, ce qui est plus couteux ici. Compteur
+# INDEPENDANT de refresh-ip-rate-limit. Fenetre glissante d'une minute, NON distribue
+# (compteurs par instance, remis a zero au redemarrage). Meme semantique
+# trusted-proxy-count que les autres filtres : 0 = X-Forwarded-For ignore.
+logout-ip-rate-limit:
+  enabled: ${LOGOUT_IP_RATE_LIMIT_ENABLED:true}
+  logout-per-minute: ${LOGOUT_IP_RATE_LIMIT_LOGOUT_PER_MINUTE:30}
+  trusted-proxy-count: ${LOGOUT_IP_RATE_LIMIT_TRUSTED_PROXY_COUNT:0}
+
 # Rate limiting IP local (in-JVM) de POST /api/v1/auth/register (decision
 # R21-D.9, Phase B - constat D4-05/R21-D.4, Option C). Second volet de la
 # remediation D4-05 : la reponse HTTP uniforme (email disponible vs deja pris,
