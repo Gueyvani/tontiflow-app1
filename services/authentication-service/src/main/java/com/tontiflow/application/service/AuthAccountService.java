@@ -174,13 +174,21 @@ public class AuthAccountService {
      * {@link com.tontiflow.interfaces.rest.AuthController#register} qui
      * traduit ce comportement en une réponse HTTP strictement identique dans
      * les deux cas, empêchant toute énumération de comptes via {@code
-     * /api/v1/auth/register}. Le contrôle {@code existsByEmail} reste un
-     * simple raccourci de performance (évite un hachage BCrypt et une
+     * /api/v1/auth/register}. Le contrôle {@code existsByEmail} évite une
      * tentative d'écriture vouée à l'échec dans le cas non concurrent le
-     * plus courant) — il n'est <b>pas</b> la protection réelle contre les
+     * plus courant — il n'est <b>pas</b> la protection réelle contre les
      * doublons, qui reste entièrement portée par la contrainte
      * {@code uk_auth_account_email} (voir ci-dessous, gestion de la
      * course).</p>
+     *
+     * <p><strong>Oracle de timing (décision TICKET-6, constat F-3)</strong> :
+     * l'email déjà pris exécute un {@code matches(...)} BCrypt contre
+     * {@link #dummyPasswordHash} (le hash factice de R21-D.8, résultat
+     * ignoré, rien n'est lu ni écrit) avant de retourner ; l'email libre
+     * exécute son {@code encode(...)} réel puis crée le compte. Les deux
+     * chemins paient ainsi un coût BCrypt comparable, ce qui réduit l'écart
+     * de latence — non éliminé à 100 % : il reste l'{@code INSERT} et le
+     * commit du seul chemin de création.</p>
      *
      * <p><strong>Course concurrente</strong> : si deux requêtes concurrentes
      * passent toutes deux {@code existsByEmail() == false} avant qu'aucune
@@ -207,6 +215,9 @@ public class AuthAccountService {
     @Transactional
     public void createAccount(String email, String rawPassword) {
         if (authAccountRepository.existsByEmail(email)) {
+            // Oracle de timing (TICKET-6, F-3) : meme cout BCrypt que le chemin de creation ci-dessous,
+            // contre le hash factice de R21-D.8 - resultat deliberement ignore, seul le cout compte.
+            passwordEncoder.matches(rawPassword, dummyPasswordHash);
             return;
         }
 

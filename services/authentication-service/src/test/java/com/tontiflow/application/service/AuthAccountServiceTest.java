@@ -44,10 +44,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -129,8 +131,73 @@ class AuthAccountServiceTest {
                 .doesNotThrowAnyException();
 
         // Aucune ecriture ne doit etre tentee - le raccourci existsByEmail() evite un
-        // hachage BCrypt et un save() voues a l'echec dans ce cas non concurrent.
+        // save() voue a l'echec dans ce cas non concurrent (le BCrypt factice de TICKET-6
+        // est verifie par les tests dedies ci-dessous).
         verify(authAccountRepository, never()).save(any());
+    }
+
+    // ------------------------------------------------------------------
+    // Decision TICKET-6 (constat F-3) : oracle de timing a l'inscription. Le chemin
+    // "email deja pris" doit executer un BCrypt reel contre le hash factice de R21-D.8
+    // (aucune ecriture, resultat ignore), comme le chemin de creation execute encode().
+    // Verifie par invocations (spy), jamais par une duree.
+    // ------------------------------------------------------------------
+
+    @Test
+    void createAccount_withExistingEmail_runsDummyBCryptMatch_withoutEncodingOrWriting() {
+        PasswordEncoder spyEncoder = spy(new BCryptPasswordEncoder());
+        AuthAccountService serviceWithSpy = newServiceWithEncoder(spyEncoder);
+        // Le constructeur a encode le hash factice (D.8) : ne compter que l'appel teste.
+        clearInvocations(spyEncoder);
+        when(authAccountRepository.existsByEmail("exists-timing@tontiflow.test")).thenReturn(true);
+
+        serviceWithSpy.createAccount("exists-timing@tontiflow.test", TEST_PASSWORD);
+
+        ArgumentCaptor<String> comparedHash = ArgumentCaptor.forClass(String.class);
+        verify(spyEncoder, times(1)).matches(eq(TEST_PASSWORD), comparedHash.capture());
+        // Aucun encode() (ni du mot de passe fourni, ni d'autre chose) sur ce chemin.
+        verify(spyEncoder, never()).encode(any());
+        // Le hash compare est le hash factice : un vrai hash BCrypt au cout configure,
+        // sans rapport avec le mot de passe fourni ni avec un compte reel.
+        assertThat(comparedHash.getValue()).startsWith("$2a$10$");
+        assertThat(new BCryptPasswordEncoder().matches(TEST_PASSWORD, comparedHash.getValue())).isFalse();
+        // Rien n'est lu ni ecrit hors existsByEmail : ni creation, ni modification de compte.
+        verify(authAccountRepository).existsByEmail("exists-timing@tontiflow.test");
+        verifyNoMoreInteractions(authAccountRepository);
+    }
+
+    @Test
+    void createAccount_existingEmailAndAuthenticateUnknownEmail_shareTheSameDummyHash() {
+        // Preuve qu'aucun second hash factice n'a ete cree : l'inscription (email pris) et le
+        // login (email inconnu, D.8) comparent contre exactement la meme valeur.
+        PasswordEncoder spyEncoder = spy(new BCryptPasswordEncoder());
+        AuthAccountService serviceWithSpy = newServiceWithEncoder(spyEncoder);
+        when(authAccountRepository.existsByEmail("exists-shared@tontiflow.test")).thenReturn(true);
+        when(authAccountRepository.findByEmail("unknown-shared@tontiflow.test")).thenReturn(Optional.empty());
+
+        serviceWithSpy.createAccount("exists-shared@tontiflow.test", TEST_PASSWORD);
+        assertThatThrownBy(() -> serviceWithSpy.authenticate("unknown-shared@tontiflow.test", TEST_PASSWORD))
+                .isInstanceOf(AccountNotFoundException.class);
+
+        ArgumentCaptor<String> hashes = ArgumentCaptor.forClass(String.class);
+        verify(spyEncoder, times(2)).matches(anyString(), hashes.capture());
+        assertThat(hashes.getAllValues().get(0)).isEqualTo(hashes.getAllValues().get(1));
+    }
+
+    @Test
+    void createAccount_withAvailableEmail_encodesOnce_andRunsNoDummyMatch() {
+        PasswordEncoder spyEncoder = spy(new BCryptPasswordEncoder());
+        AuthAccountService serviceWithSpy = newServiceWithEncoder(spyEncoder);
+        clearInvocations(spyEncoder);
+        when(authAccountRepository.existsByEmail("free-timing@tontiflow.test")).thenReturn(false);
+        when(authAccountRepository.save(any(AuthAccount.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        serviceWithSpy.createAccount("free-timing@tontiflow.test", TEST_PASSWORD);
+
+        // Un seul calcul BCrypt sur le chemin de creation : le correctif ne doit pas doubler son cout.
+        verify(spyEncoder, times(1)).encode(TEST_PASSWORD);
+        verify(spyEncoder, never()).matches(any(), anyString());
+        verify(authAccountRepository).save(any(AuthAccount.class));
     }
 
     @Test
