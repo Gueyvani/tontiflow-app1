@@ -136,7 +136,7 @@
 	</build>
 
 	<profiles>
-		<!-- Validation PostgreSQL reelle (Testcontainers, postgres:16-alpine, Flyway V1..V5) :
+		<!-- Validation PostgreSQL reelle (Testcontainers, postgres:16-alpine, Flyway V1..V6) :
 		         ./mvnw -pl services/authentication-service -Ppostgres-integration test
 		     Ce profil retire l'exclusion : les tests PostgreSQL sont alors executes en plus des
 		     autres tests du module. Docker est requis ; sans Docker ils ECHOUENT (jamais ignores). -->

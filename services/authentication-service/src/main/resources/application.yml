@@ -61,6 +61,22 @@ rbac:
 # distincte de jwt.access-token-ttl qui ne concerne que l'Access Token.
 refresh-token:
   ttl: 30d
+  # Purge des Refresh Tokens (decision F-2). Une famille de rotation n'est supprimee que
+  # lorsque TOUS ses jetons sont expires depuis plus de `grace` : un ancien jeton expire dont la
+  # famille a encore un successeur valide est conserve (le logout avec ce jeton doit continuer a
+  # le revoquer). Un jeton revoque mais non expire est conserve (detection de reutilisation).
+  purge:
+    enabled: ${REFRESH_TOKEN_PURGE_ENABLED:true}
+    # Delai entre deux passes (ms), apres la fin de la precedente. Retention de 30 j : une passe
+    # horaire suffit.
+    interval-ms: ${REFRESH_TOKEN_PURGE_INTERVAL_MS:3600000}
+    # Marge TECHNIQUE (pas une regle de conformite) : couvre le decalage d'horloge entre instances
+    # et une rotation en cours autour de l'expiration, pour ne jamais supprimer une famille dont
+    # un jeton vient d'etre presente. Format simplifie Spring Boot (d/h/m/s).
+    grace: ${REFRESH_TOKEN_PURGE_GRACE:10m}
+    # Taille maximale d'un lot (1 transaction courte par lot) : une lecture indexee puis un
+    # DELETE par cle primaire. A ajuster par mesure sur la volumetrie reelle.
+    batch-size: ${REFRESH_TOKEN_PURGE_BATCH_SIZE:1000}
 
 # Ralentissement progressif apres echecs d'authentification repetes (decision
 # R21-D.5 - remplace le verrouillage dur de R21-D.3, qui permettait a

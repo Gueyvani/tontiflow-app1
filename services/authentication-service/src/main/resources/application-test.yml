@@ -14,3 +14,9 @@ spring:
       password: test
   flyway:
     enabled: false
+
+# Purge des Refresh Tokens (decision F-2) desactivee par defaut sous le profil test : la planification
+# n'a pas a s'executer pendant les suites ; les tests appellent RefreshTokenPurgeService directement.
+refresh-token:
+  purge:
+    enabled: false

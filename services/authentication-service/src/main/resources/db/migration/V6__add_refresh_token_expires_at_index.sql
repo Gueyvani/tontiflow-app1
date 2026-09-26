@@ -1,0 +1,17 @@
+-- V6 : index sur refresh_token.expires_at (decision F-2, purge des Refresh Tokens).
+--
+-- La purge (RefreshTokenPurgeService) parcourt les lignes expirees dans l'ordre
+-- (expires_at, id) : sans cet index chaque passe lirait toute la table, qui est justement
+-- celle qui grossit. Cout : une ecriture d'index supplementaire par INSERT dans refresh_token
+-- (un par refresh reussi), proportionnelle au nombre de lignes conservees. Aucune colonne
+-- n'est modifiee.
+--
+-- Impact au deploiement : Flyway execute ce script dans une transaction ; un CREATE INDEX
+-- ordinaire empeche les ecritures sur refresh_token (login, refresh, logout) pendant la
+-- construction de l'index, d'autant plus longtemps que la table est volumineuse (jamais purgee
+-- jusqu'ici, volume inconnu du depot). Pour une table deja volumineuse, creer l'index AVANT le
+-- deploiement, hors transaction et sans bloquer les ecritures :
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_refresh_token_expires_at
+--       ON refresh_token (expires_at);
+-- Le "IF NOT EXISTS" ci-dessous rend alors cette migration sans effet.
+CREATE INDEX IF NOT EXISTS idx_refresh_token_expires_at ON refresh_token (expires_at);

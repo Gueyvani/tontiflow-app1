@@ -8,6 +8,8 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.time.Instant;
+import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -81,4 +83,58 @@ public interface RefreshTokenRepository extends JpaRepository<RefreshToken, UUID
               AND revoked_at IS NULL
             """, nativeQuery = true)
     int revokeAllActiveForAccount(@Param("accountId") UUID accountId, @Param("revokedAt") Instant revokedAt);
+
+    /**
+     * Lot de lignes purgeables (décision F-2) : une ligne l'est si elle est expirée avant
+     * {@code cutoff} <b>et</b> si <b>aucun</b> jeton de sa famille n'a {@code expires_at >= cutoff}
+     * (famille entièrement expirée au-delà de la marge). Un ancien jeton expiré dont la famille a
+     * encore un successeur non expiré n'est donc jamais retourné : {@code /logout} avec ce jeton
+     * doit continuer à révoquer ce successeur.
+     *
+     * <p>Requête native SQL standard (PostgreSQL et H2), sans construction propre à un moteur : le
+     * parcours suit l'index {@code idx_refresh_token_expires_at} dans l'ordre
+     * {@code (expires_at, id)} et un curseur ({@code afterExpiresAt}, {@code afterId}) évite de
+     * relire, à chaque lot d'une même passe, les lignes expirées mais non purgeables. Le curseur est une
+     * comparaison de ligne SQL {@code (expires_at, id) > (?, ?)} : PostgreSQL la traduit en borne de départ
+     * de l'index (une forme {@code a > ? OR (a = ? AND b > ?)} obligerait à relire le préfixe de l'index à
+     * chaque lot) ; H2 2.2 la supporte avec la même sémantique lexicographique.</p>
+     *
+     * <p><b>Multi-instance</b> : {@code FOR UPDATE SKIP LOCKED} verrouille les lignes du lot jusqu'à
+     * la fin de la transaction du lot (le {@code DELETE} suivant est dans la même transaction) et fait
+     * sauter les lignes déjà verrouillées par une autre instance : deux passes simultanées traitent des
+     * lots disjoints, sans attente ni interblocage. Supporté par PostgreSQL et par H2 (vérifié par les
+     * tests). Le verrou ne porte que sur {@code r} (la sous-requête {@code NOT EXISTS} n'est pas
+     * verrouillée) et ne peut jamais s'opposer à {@code /login} ou {@code /refresh}, qui ne touchent que
+     * des lignes de familles vivantes. {@code expires_at} n'est jamais modifié et une famille entièrement
+     * expirée ne reçoit plus de successeur ({@code rotate} refuse un jeton expiré) : une ligne
+     * retournée reste purgeable jusqu'à sa suppression. Un lot partiel signifie donc que les candidats
+     * non verrouillés sont épuisés.</p>
+     */
+    @Query(value = """
+            SELECT r.*
+            FROM refresh_token r
+            WHERE r.expires_at < :cutoff
+              AND (r.expires_at, r.id) > (:afterExpiresAt, :afterId)
+              AND NOT EXISTS (
+                  SELECT 1 FROM refresh_token s
+                  WHERE s.family_id = r.family_id
+                    AND s.expires_at >= :cutoff)
+            ORDER BY r.expires_at, r.id
+            LIMIT :batchSize
+            FOR UPDATE SKIP LOCKED
+            """, nativeQuery = true)
+    List<RefreshToken> findPurgeableBatch(@Param("cutoff") Instant cutoff,
+                                          @Param("afterExpiresAt") Instant afterExpiresAt,
+                                          @Param("afterId") UUID afterId,
+                                          @Param("batchSize") int batchSize);
+
+    /**
+     * Supprime physiquement les lignes données (décision F-2). Le prédicat {@code expires_at <
+     * cutoff} est redondant avec {@link #findPurgeableBatch} : garde-fou pour ne jamais supprimer
+     * un jeton encore conservable, même en cas de mauvais usage. Idempotent : des identifiants
+     * déjà supprimés (autre instance) ne provoquent aucune erreur.
+     */
+    @Modifying
+    @Query("delete from RefreshToken r where r.id in :ids and r.expiresAt < :cutoff")
+    int deleteExpiredByIds(@Param("ids") Collection<UUID> ids, @Param("cutoff") Instant cutoff);
 }

@@ -102,13 +102,13 @@ class LoginLockContentionPostgresIntegrationTest {
     private DataSource dataSource;
 
     @Test
-    void flywayMigrationsV1toV5_areAppliedOnRealPostgres() throws Exception {
+    void flywayMigrationsV1toV6_areAppliedOnRealPostgres() throws Exception {
         try (Connection c = dataSource.getConnection();
              PreparedStatement ps = c.prepareStatement(
                      "SELECT count(*) FROM flyway_schema_history WHERE success AND version IS NOT NULL");
              ResultSet rs = ps.executeQuery()) {
             assertThat(rs.next()).isTrue();
-            assertThat(rs.getInt(1)).as("migrations V1..V5 executees avec succes").isEqualTo(5);
+            assertThat(rs.getInt(1)).as("migrations V1..V6 executees avec succes (V6 : index refresh_token.expires_at, F-2)").isEqualTo(6);
         }
         try (Connection c = dataSource.getConnection();
              PreparedStatement ps = c.prepareStatement(
