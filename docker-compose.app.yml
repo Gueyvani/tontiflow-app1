@@ -180,9 +180,8 @@ services:
       INTERNAL_SERVICE_TOKEN_SECRET: ${INTERNAL_SERVICE_TOKEN_SECRET:?INTERNAL_SERVICE_TOKEN_SECRET doit etre defini dans .env.app}
     networks: [tontiflow-net]
     # Pas de port publie (point critique R12) : financial-service n'est
-    # joignable que via le reseau Docker interne (tontine-service, Gateway
-    # pour /api/v1/financials/** - actuellement inutilise, /internal/**
-    # jamais routee).
+    # joignable que via le reseau Docker interne (tontine-service, par jeton
+    # de service). Le Gateway ne route plus rien vers lui (decision F-8b).
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8083/actuator/health | grep -q '\"status\":\"UP\"'"]
       interval: 10s

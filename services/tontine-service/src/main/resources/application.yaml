@@ -31,9 +31,8 @@ jwt:
   public-key-location: ${JWT_PUBLIC_KEY_PATH}
 
 # Appel service-a-service vers financial-service (decision R3, FinancialServiceClient).
-# Meme nom de variable d'environnement et meme valeur par defaut que la route
-# Gateway existante (api-gateway/application.yml) : coherence entre les deux
-# points d'acces a financial-service.
+# Le Gateway ne route plus rien vers financial-service (decision F-8b) : tontine-service est
+# son seul appelant. Meme nom de variable d'environnement que dans docker-compose.app.yml.
 financial-service:
   url: ${FINANCIAL_SERVICE_URL:http://localhost:8083}
 

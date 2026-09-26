@@ -28,10 +28,10 @@ import java.util.UUID;
  * spring-boot-starter-web}, aucune nouvelle dépendance type OpenFeign,
  * absent du monorepo — vérifié à l'inspection).
  *
- * <p>URL de base : réutilise exactement le même nom de variable
- * d'environnement que la Gateway ({@code FINANCIAL_SERVICE_URL}, cf. {@code
- * api-gateway/application.yml}), même valeur par défaut — cohérence entre
- * les deux points d'accès à {@code financial-service}.</p>
+ * <p>URL de base : variable d'environnement {@code FINANCIAL_SERVICE_URL}
+ * (même nom que dans {@code docker-compose.app.yml}). Le Gateway ne route plus
+ * rien vers {@code financial-service} (décision F-8b) : ce client en est le
+ * seul point d'accès.</p>
  *
  * <p>Timeout localisé à ce client uniquement (5 s connexion/lecture) — ne
  * modifie aucune configuration globale d'un autre service (§28).</p>

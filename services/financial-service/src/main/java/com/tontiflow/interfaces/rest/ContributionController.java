@@ -13,25 +13,16 @@ import org.springframework.web.bind.annotation.RestController;
  * contribution déjà validée métier par {@code tontine-service} (créateur
  * authentifié, membre/round revalidés côté tontine).
  *
- * <p><b>Hors routage Gateway par construction</b> : la Gateway ne route
- * que {@code Path=/api/v1/financials/**} vers ce service (voir {@code
- * api-gateway/application.yml}) ; ce contrôleur est monté sous {@code
- * /internal/**}, un préfixe pour lequel la Gateway ne déclare aucun
- * prédicat — toute requête externe vers {@code /internal/contributions}
- * via la Gateway reçoit un 404 de la Gateway elle-même, sans jamais
- * atteindre ce service. Reste protégé par la même chaîne JWT que le reste
- * de {@code financial-service} ({@code SecurityConfig}, {@code
- * anyRequest().authenticated()}, inchangée) : {@code tontine-service}
- * transmet le JWT de l'appelant original lors de l'appel service-à-service
- * (défense en profondeur, cf. Javadoc de {@code FinancialServiceClient}
- * côté tontine-service).</p>
+ * <p><b>Hors routage Gateway</b> (décision F-8b) : la Gateway ne déclare
+ * plus aucune route vers {@code financial-service}, donc toute requête
+ * externe vers {@code /internal/contributions} (ou vers un chemin de type
+ * {@code /api/v1/financials/...}) reçoit un 404 de la Gateway elle-même,
+ * sans jamais atteindre ce service.</p>
  *
- * <p><b>Risque résiduel documenté honnêtement</b> (décision R3, §26) :
- * aucune primitive cryptographique service-à-service n'est introduite ; un
- * accès réseau direct au port de {@code financial-service} (contournant la
- * Gateway) resterait capable d'atteindre cet endpoint muni d'un JWT valide
- * — même modèle de confiance implicite que celui déjà en vigueur pour tous
- * les autres services de ce monorepo, pas un risque nouveau introduit ici.</p>
+ * <p><b>Authentification (décision F-8)</b> : seuls les appels de
+ * {@code tontine-service} munis d'un jeton de service HS256 court, de portée
+ * {@code ledger.write}, sont acceptés ({@code SecurityConfig}) ; un JWT
+ * utilisateur n'est plus accepté.</p>
  */
 @RestController
 public class ContributionController {

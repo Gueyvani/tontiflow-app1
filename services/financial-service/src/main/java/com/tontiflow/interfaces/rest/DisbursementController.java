@@ -11,10 +11,9 @@ import org.springframework.web.bind.annotation.RestController;
 /**
  * Endpoint interne (décision R6, symétrique à {@code ContributionController}
  * — décision R3) : reçoit une demande de versement déjà validée métier par
- * {@code tontine-service}. Hors routage Gateway par construction, même
- * raisonnement documenté sur {@code ContributionController} — la Gateway ne
- * route que {@code Path=/api/v1/financials/**}, {@code /internal/**} n'y
- * correspond jamais.
+ * {@code tontine-service}. Hors routage Gateway (décision F-8b) et protégé
+ * par jeton de service (décision F-8), même raisonnement documenté sur
+ * {@code ContributionController} : portée {@code ledger.write} exigée.
  */
 @RestController
 public class DisbursementController {

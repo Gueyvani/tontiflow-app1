@@ -17,11 +17,9 @@ import java.util.List;
  * {@code DisbursementController} — décisions R3/R6) : consultation en
  * lecture seule du solde d'un compte financier, jamais d'écriture.
  *
- * <p><b>Hors routage Gateway par construction</b> — même raisonnement que
- * {@code ContributionController} (voir son Javadoc) : monté sous {@code
- * /internal/**}, préfixe pour lequel la Gateway ne déclare aucun prédicat.
- * Reste protégé par la même chaîne JWT ({@code SecurityConfig},
- * {@code anyRequest().authenticated()}, inchangée).</p>
+ * <p><b>Hors routage Gateway</b> (décision F-8b) et protégé par jeton de
+ * service (décision F-8) — même raisonnement que {@code ContributionController}
+ * (voir son Javadoc) : portée {@code ledger.read} exigée pour ces lectures.</p>
  *
  * <p>Ne crée jamais de {@code FinancialAccount} : voir Javadoc de {@link
  * LedgerService#getAccountBalance}.</p>

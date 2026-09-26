@@ -15,18 +15,10 @@ spring:
           uri: ${TONTINE_SERVICE_URL:http://localhost:8082}
           predicates:
             - Path=/api/v1/tontines/**
-        - id: financial-service
-          uri: ${FINANCIAL_SERVICE_URL:http://localhost:8083}
-          predicates:
-            - Path=/api/v1/financials/**
-        - id: credit-service
-          uri: ${CREDIT_SERVICE_URL:http://localhost:8084}
-          predicates:
-            - Path=/api/v1/credits/**
-        - id: notification-service
-          uri: ${NOTIFICATION_SERVICE_URL:http://localhost:8085}
-          predicates:
-            - Path=/api/v1/notifications/**
+        # Decision F-8b : aucune route vers financial-service (endpoints /internal/** appeles
+        # uniquement par tontine-service, par jeton de service), credit-service ni
+        # notification-service (aucun endpoint public pour l'instant). Un futur endpoint public de
+        # l'un de ces services devra ajouter sa route explicitement.
         - id: authentication-service
           uri: ${AUTHENTICATION_SERVICE_URL:http://localhost:8086}
           predicates:
