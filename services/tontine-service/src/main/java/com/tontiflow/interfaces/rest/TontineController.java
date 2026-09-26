@@ -17,7 +17,6 @@ import com.tontiflow.interfaces.rest.dto.TontineConfigResponse;
 import com.tontiflow.interfaces.rest.dto.TontineResponse;
 import com.tontiflow.interfaces.rest.dto.UpdateTontineConfigRequest;
 import jakarta.validation.Valid;
-import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
@@ -26,7 +25,6 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -93,11 +91,10 @@ public class TontineController {
     @GetMapping("/{tontineId}/balance")
     public ResponseEntity<TontineBalanceResponse> getBalance(
             @PathVariable Long tontineId,
-            @RequestHeader(HttpHeaders.AUTHORIZATION) String authorizationHeader,
             Authentication authentication) {
         UserContext caller = (UserContext) authentication.getPrincipal();
         AccountBalanceResponse balance = balanceApplicationService.getTontineBalance(
-                tontineId, caller.userId(), authorizationHeader);
+                tontineId, caller.userId());
         return ResponseEntity.ok(new TontineBalanceResponse(tontineId, balance.currency(), balance.balance()));
     }
 
@@ -109,11 +106,10 @@ public class TontineController {
     @GetMapping("/{tontineId}/statement")
     public ResponseEntity<List<StatementLineResponse>> getStatement(
             @PathVariable Long tontineId,
-            @RequestHeader(HttpHeaders.AUTHORIZATION) String authorizationHeader,
             Authentication authentication) {
         UserContext caller = (UserContext) authentication.getPrincipal();
         List<StatementLineResponse> statement = balanceApplicationService
-                .getTontineStatement(tontineId, caller.userId(), authorizationHeader)
+                .getTontineStatement(tontineId, caller.userId())
                 .stream()
                 .map(StatementLineResponse::from)
                 .toList();
@@ -148,11 +144,10 @@ public class TontineController {
     @GetMapping("/{tontineId}/members/{memberId}/balance")
     public ResponseEntity<MemberBalanceResponse> getMemberBalance(
             @PathVariable Long tontineId, @PathVariable Long memberId,
-            @RequestHeader(HttpHeaders.AUTHORIZATION) String authorizationHeader,
             Authentication authentication) {
         UserContext caller = (UserContext) authentication.getPrincipal();
         AccountBalanceResponse balance = balanceApplicationService.getMemberBalance(
-                tontineId, memberId, caller.userId(), authorizationHeader);
+                tontineId, memberId, caller.userId());
         return ResponseEntity.ok(new MemberBalanceResponse(tontineId, memberId, balance.currency(), balance.balance()));
     }
 
@@ -165,11 +160,10 @@ public class TontineController {
     @GetMapping("/{tontineId}/members/{memberId}/statement")
     public ResponseEntity<List<StatementLineResponse>> getMemberStatement(
             @PathVariable Long tontineId, @PathVariable Long memberId,
-            @RequestHeader(HttpHeaders.AUTHORIZATION) String authorizationHeader,
             Authentication authentication) {
         UserContext caller = (UserContext) authentication.getPrincipal();
         List<StatementLineResponse> statement = balanceApplicationService
-                .getMemberStatement(tontineId, memberId, caller.userId(), authorizationHeader)
+                .getMemberStatement(tontineId, memberId, caller.userId())
                 .stream()
                 .map(StatementLineResponse::from)
                 .toList();

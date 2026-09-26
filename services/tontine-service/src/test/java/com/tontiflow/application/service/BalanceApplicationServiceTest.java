@@ -65,9 +65,9 @@ class BalanceApplicationServiceTest {
         UUID creator = UUID.randomUUID();
         when(tontineRepository.findById(1L)).thenReturn(Optional.of(tontine(1L, creator)));
         AccountBalanceResponse expected = new AccountBalanceResponse("MRU", new BigDecimal("700.00"));
-        when(financialServiceClient.getBalance(1L, "Bearer test-token")).thenReturn(expected);
+        when(financialServiceClient.getBalance(1L, creator)).thenReturn(expected);
 
-        AccountBalanceResponse result = service.getTontineBalance(1L, creator, "Bearer test-token");
+        AccountBalanceResponse result = service.getTontineBalance(1L, creator);
 
         assertThat(result).isSameAs(expected);
     }
@@ -78,7 +78,7 @@ class BalanceApplicationServiceTest {
         UUID attacker = UUID.randomUUID();
         when(tontineRepository.findById(1L)).thenReturn(Optional.of(tontine(1L, creator)));
 
-        assertThatThrownBy(() -> service.getTontineBalance(1L, attacker, "Bearer test-token"))
+        assertThatThrownBy(() -> service.getTontineBalance(1L, attacker))
                 .isInstanceOf(AccessDeniedException.class);
 
         verifyNoInteractions(financialServiceClient);
@@ -88,7 +88,7 @@ class BalanceApplicationServiceTest {
     void getTontineBalance_withUnknownTontine_throwsIllegalArgumentException_andNoFinancialCallMade() {
         when(tontineRepository.findById(1L)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> service.getTontineBalance(1L, UUID.randomUUID(), "Bearer test-token"))
+        assertThatThrownBy(() -> service.getTontineBalance(1L, UUID.randomUUID()))
                 .isInstanceOf(IllegalArgumentException.class);
 
         verifyNoInteractions(financialServiceClient);
@@ -100,9 +100,9 @@ class BalanceApplicationServiceTest {
         when(tontineRepository.findById(1L)).thenReturn(Optional.of(tontine(1L, creator)));
         when(memberRepository.findById(100L)).thenReturn(Optional.of(member(100L, 1L)));
         AccountBalanceResponse expected = new AccountBalanceResponse("MRU", new BigDecimal("300.00"));
-        when(financialServiceClient.getMemberBalance(100L, "Bearer test-token")).thenReturn(expected);
+        when(financialServiceClient.getMemberBalance(100L, creator)).thenReturn(expected);
 
-        AccountBalanceResponse result = service.getMemberBalance(1L, 100L, creator, "Bearer test-token");
+        AccountBalanceResponse result = service.getMemberBalance(1L, 100L, creator);
 
         assertThat(result).isSameAs(expected);
     }
@@ -113,7 +113,7 @@ class BalanceApplicationServiceTest {
         UUID attacker = UUID.randomUUID();
         when(tontineRepository.findById(1L)).thenReturn(Optional.of(tontine(1L, creator)));
 
-        assertThatThrownBy(() -> service.getMemberBalance(1L, 100L, attacker, "Bearer test-token"))
+        assertThatThrownBy(() -> service.getMemberBalance(1L, 100L, attacker))
                 .isInstanceOf(AccessDeniedException.class);
 
         verifyNoInteractions(financialServiceClient, memberRepository);
@@ -125,7 +125,7 @@ class BalanceApplicationServiceTest {
         when(tontineRepository.findById(1L)).thenReturn(Optional.of(tontine(1L, creator)));
         when(memberRepository.findById(100L)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> service.getMemberBalance(1L, 100L, creator, "Bearer test-token"))
+        assertThatThrownBy(() -> service.getMemberBalance(1L, 100L, creator))
                 .isInstanceOf(IllegalArgumentException.class);
 
         verifyNoInteractions(financialServiceClient);
@@ -137,7 +137,7 @@ class BalanceApplicationServiceTest {
         when(tontineRepository.findById(1L)).thenReturn(Optional.of(tontine(1L, creator)));
         when(memberRepository.findById(100L)).thenReturn(Optional.of(member(100L, 999L)));
 
-        assertThatThrownBy(() -> service.getMemberBalance(1L, 100L, creator, "Bearer test-token"))
+        assertThatThrownBy(() -> service.getMemberBalance(1L, 100L, creator))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("n'appartient pas");
 
@@ -151,9 +151,9 @@ class BalanceApplicationServiceTest {
         List<LedgerLineResponse> expected = List.of(
                 new LedgerLineResponse("CONTRIBUTION_RECORDED", "desc", new BigDecimal("1000.00"),
                         BigDecimal.ZERO, "MRU", Instant.now()));
-        when(financialServiceClient.getStatement(1L, "Bearer test-token")).thenReturn(expected);
+        when(financialServiceClient.getStatement(1L, creator)).thenReturn(expected);
 
-        List<LedgerLineResponse> result = service.getTontineStatement(1L, creator, "Bearer test-token");
+        List<LedgerLineResponse> result = service.getTontineStatement(1L, creator);
 
         assertThat(result).isSameAs(expected);
     }
@@ -164,7 +164,7 @@ class BalanceApplicationServiceTest {
         UUID attacker = UUID.randomUUID();
         when(tontineRepository.findById(1L)).thenReturn(Optional.of(tontine(1L, creator)));
 
-        assertThatThrownBy(() -> service.getTontineStatement(1L, attacker, "Bearer test-token"))
+        assertThatThrownBy(() -> service.getTontineStatement(1L, attacker))
                 .isInstanceOf(AccessDeniedException.class);
 
         verifyNoInteractions(financialServiceClient);
@@ -174,7 +174,7 @@ class BalanceApplicationServiceTest {
     void getTontineStatement_withUnknownTontine_throwsIllegalArgumentException_andNoFinancialCallMade() {
         when(tontineRepository.findById(1L)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> service.getTontineStatement(1L, UUID.randomUUID(), "Bearer test-token"))
+        assertThatThrownBy(() -> service.getTontineStatement(1L, UUID.randomUUID()))
                 .isInstanceOf(IllegalArgumentException.class);
 
         verifyNoInteractions(financialServiceClient);
@@ -188,9 +188,9 @@ class BalanceApplicationServiceTest {
         List<LedgerLineResponse> expected = List.of(
                 new LedgerLineResponse("DISBURSEMENT_RECORDED", "desc", BigDecimal.ZERO,
                         new BigDecimal("300.00"), "MRU", Instant.now()));
-        when(financialServiceClient.getMemberStatement(100L, "Bearer test-token")).thenReturn(expected);
+        when(financialServiceClient.getMemberStatement(100L, creator)).thenReturn(expected);
 
-        List<LedgerLineResponse> result = service.getMemberStatement(1L, 100L, creator, "Bearer test-token");
+        List<LedgerLineResponse> result = service.getMemberStatement(1L, 100L, creator);
 
         assertThat(result).isSameAs(expected);
     }
@@ -201,7 +201,7 @@ class BalanceApplicationServiceTest {
         when(tontineRepository.findById(1L)).thenReturn(Optional.of(tontine(1L, creator)));
         when(memberRepository.findById(100L)).thenReturn(Optional.of(member(100L, 999L)));
 
-        assertThatThrownBy(() -> service.getMemberStatement(1L, 100L, creator, "Bearer test-token"))
+        assertThatThrownBy(() -> service.getMemberStatement(1L, 100L, creator))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("n'appartient pas");
 

@@ -1,6 +1,6 @@
 package com.tontiflow;
 
-import com.tontiflow.infrastructure.security.JwtTestSecurityConfiguration;
+import com.tontiflow.infrastructure.security.ServiceTokenTestConfiguration;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
@@ -14,7 +14,7 @@ import org.springframework.test.context.ActiveProfiles;
 // l'introduction de leur propre securite JWT.
 @SpringBootTest
 @ActiveProfiles("test")
-@Import(JwtTestSecurityConfiguration.class)
+@Import(ServiceTokenTestConfiguration.class)
 class FinancialServiceApplicationTests {
 
     @Test

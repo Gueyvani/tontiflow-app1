@@ -36,7 +36,6 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -73,7 +72,7 @@ class ContributionIntegrationTest {
                 "/api/v1/tontines/1/rounds/1/contributions", jsonBody(1L), String.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
-        verify(financialServiceClient, never()).recordContribution(any(), any(), any(), any(), anyString());
+        verify(financialServiceClient, never()).recordContribution(any(), any(), any(), any(), any(java.util.UUID.class));
     }
 
     @Test
@@ -89,7 +88,7 @@ class ContributionIntegrationTest {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         verify(financialServiceClient).recordContribution(
-                eq(tontineId), eq(roundId), eq(memberId), eq(new BigDecimal("5000.00")), anyString());
+                eq(tontineId), eq(roundId), eq(memberId), eq(new BigDecimal("5000.00")), any(java.util.UUID.class));
     }
 
     // TEST 44 (§7/§44.1) : non-createur -> refus, aucune ecriture financiere.
@@ -105,7 +104,7 @@ class ContributionIntegrationTest {
                 jsonBody(memberId), UUID.randomUUID());
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
-        verify(financialServiceClient, never()).recordContribution(any(), any(), any(), any(), anyString());
+        verify(financialServiceClient, never()).recordContribution(any(), any(), any(), any(), any(java.util.UUID.class));
     }
 
     // TEST 44.3 (§44, troisieme test) : roundId appartient a Tontine B, mais
@@ -125,7 +124,7 @@ class ContributionIntegrationTest {
                 jsonBody(memberOfA), creatorA);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
-        verify(financialServiceClient, never()).recordContribution(any(), any(), any(), any(), anyString());
+        verify(financialServiceClient, never()).recordContribution(any(), any(), any(), any(), any(java.util.UUID.class));
     }
 
     // TEST 44.2 (§44, deuxieme test) : memberId appartient a Tontine B ->
@@ -145,7 +144,7 @@ class ContributionIntegrationTest {
                 jsonBody(memberOfB), creatorA);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
-        verify(financialServiceClient, never()).recordContribution(any(), any(), any(), any(), anyString());
+        verify(financialServiceClient, never()).recordContribution(any(), any(), any(), any(), any(java.util.UUID.class));
     }
 
     private Long createTontineAndGetId(UUID creator) {

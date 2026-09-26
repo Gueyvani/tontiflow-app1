@@ -12,7 +12,6 @@ import com.tontiflow.interfaces.rest.dto.ReplaceBeneficiaryRequest;
 import com.tontiflow.interfaces.rest.dto.RotationHistoryResponse;
 import com.tontiflow.interfaces.rest.dto.TontineRoundResponse;
 import jakarta.validation.Valid;
-import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -20,7 +19,6 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -69,11 +67,10 @@ public class TontineRoundController {
     public ResponseEntity<ContributionResponse> recordContribution(
             @PathVariable Long tontineId, @PathVariable Long roundId,
             @Valid @RequestBody ContributionRequest request,
-            @RequestHeader(HttpHeaders.AUTHORIZATION) String authorizationHeader,
             Authentication authentication) {
         UserContext caller = (UserContext) authentication.getPrincipal();
         TontineRound round = contributionApplicationService.recordContribution(
-                tontineId, roundId, request.memberId(), caller.userId(), authorizationHeader);
+                tontineId, roundId, request.memberId(), caller.userId());
         return ResponseEntity.ok(new ContributionResponse(tontineId, roundId, request.memberId(), round.getAmount()));
     }
 
@@ -91,11 +88,10 @@ public class TontineRoundController {
     @PostMapping("/{tontineId}/rounds/{roundId}/disbursements")
     public ResponseEntity<DisbursementResponse> recordDisbursement(
             @PathVariable Long tontineId, @PathVariable Long roundId,
-            @RequestHeader(HttpHeaders.AUTHORIZATION) String authorizationHeader,
             Authentication authentication) {
         UserContext caller = (UserContext) authentication.getPrincipal();
         TontineRound round = disbursementApplicationService.recordDisbursement(
-                tontineId, roundId, caller.userId(), authorizationHeader);
+                tontineId, roundId, caller.userId());
         return ResponseEntity.ok(
                 new DisbursementResponse(tontineId, roundId, round.getBeneficiaryId(), round.getAmount()));
     }

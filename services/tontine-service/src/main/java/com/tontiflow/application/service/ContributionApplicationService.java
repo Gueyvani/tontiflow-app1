@@ -64,8 +64,7 @@ public class ContributionApplicationService {
      * @throws org.springframework.security.access.AccessDeniedException si {@code callerUserId}
      *                                   n'est pas le créateur de {@code tontineId}
      */
-    public TontineRound recordContribution(Long tontineId, Long roundId, Long memberId, UUID callerUserId,
-                                            String authorizationHeader) {
+    public TontineRound recordContribution(Long tontineId, Long roundId, Long memberId, UUID callerUserId) {
         Tontine tontine = tontineRepository.findById(tontineId)
                 .orElseThrow(() -> new IllegalArgumentException("Tontine non trouvée"));
         TontineApplicationService.requireCreator(tontine, callerUserId);
@@ -83,7 +82,7 @@ public class ContributionApplicationService {
         }
 
         financialServiceClient.recordContribution(
-                tontineId, roundId, memberId, round.getAmount(), authorizationHeader);
+                tontineId, roundId, memberId, round.getAmount(), callerUserId);
 
         return round;
     }

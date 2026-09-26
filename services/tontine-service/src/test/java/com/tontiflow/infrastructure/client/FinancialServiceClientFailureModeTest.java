@@ -1,6 +1,7 @@
 package com.tontiflow.infrastructure.client;
 
 import com.sun.net.httpserver.HttpServer;
+import com.tontiflow.security.jwt.ServiceTokenCodec;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.client.ResourceAccessException;
@@ -9,6 +10,7 @@ import org.springframework.web.client.RestClientResponseException;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.net.InetSocketAddress;
+import java.time.Clock;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.concurrent.ExecutorService;
@@ -35,6 +37,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * instanciable directement avec une URL de base arbitraire.</p>
  */
 class FinancialServiceClientFailureModeTest {
+
+    private static final String TEST_SECRET = "tontine-client-test-only-secret-0123456789";
+    private static final java.util.UUID ON_BEHALF_OF = java.util.UUID.randomUUID();
+
+    private final ServiceTokenCodec codec = new ServiceTokenCodec(TEST_SECRET, Clock.systemUTC());
 
     private ServerSocket blackholeSocket;
     private ExecutorService blackholeExecutor;
@@ -75,10 +82,10 @@ class FinancialServiceClientFailureModeTest {
             }
         });
 
-        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + port);
+        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + port, codec);
 
         long start = System.nanoTime();
-        assertThatThrownBy(() -> client.recordContribution(1L, 1L, 1L, new BigDecimal("100.00"), "Bearer irrelevant"))
+        assertThatThrownBy(() -> client.recordContribution(1L, 1L, 1L, new BigDecimal("100.00"), ON_BEHALF_OF))
                 .isInstanceOf(IllegalStateException.class)
                 // Decision R14-B3-B (§4) : une erreur reseau/timeout doit rester
                 // distinguable en interne (ResourceAccessException) d'une vraie
@@ -110,9 +117,9 @@ class FinancialServiceClientFailureModeTest {
         });
         httpServer.start();
 
-        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort());
+        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort(), codec);
 
-        assertThatThrownBy(() -> client.recordContribution(1L, 1L, 1L, new BigDecimal("100.00"), "Bearer irrelevant"))
+        assertThatThrownBy(() -> client.recordContribution(1L, 1L, 1L, new BigDecimal("100.00"), ON_BEHALF_OF))
                 .isInstanceOf(IllegalStateException.class)
                 // Le message reste generique (§8) - jamais le corps brut de la reponse distante.
                 .hasMessageNotContaining("internal error");
@@ -132,9 +139,9 @@ class FinancialServiceClientFailureModeTest {
         });
         httpServer.start();
 
-        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort());
+        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort(), codec);
 
-        assertThatThrownBy(() -> client.recordContribution(1L, 1L, 1L, new BigDecimal("100.00"), "Bearer irrelevant"))
+        assertThatThrownBy(() -> client.recordContribution(1L, 1L, 1L, new BigDecimal("100.00"), ON_BEHALF_OF))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageNotContaining("service unavailable")
                 // Decision R14-B3-B (§4) : cause technique exacte conservee en

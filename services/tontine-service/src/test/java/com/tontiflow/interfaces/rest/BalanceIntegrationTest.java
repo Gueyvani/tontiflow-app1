@@ -34,7 +34,6 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -67,7 +66,7 @@ class BalanceIntegrationTest {
     void getBalance_asCreator_returnsBalanceFromFinancialService() {
         UUID creator = UUID.randomUUID();
         Long tontineId = createTontineAndGetId(creator);
-        when(financialServiceClient.getBalance(eq(tontineId), anyString()))
+        when(financialServiceClient.getBalance(eq(tontineId), any(java.util.UUID.class)))
                 .thenReturn(new AccountBalanceResponse("MRU", new BigDecimal("700.00")));
 
         ResponseEntity<String> response = exchangeWithBearer(
@@ -75,7 +74,7 @@ class BalanceIntegrationTest {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody()).contains("700.00").contains("MRU");
-        verify(financialServiceClient).getBalance(eq(tontineId), anyString());
+        verify(financialServiceClient).getBalance(eq(tontineId), any(java.util.UUID.class));
     }
 
     @Test
@@ -87,7 +86,7 @@ class BalanceIntegrationTest {
                 "/api/v1/tontines/" + tontineId + "/balance", UUID.randomUUID());
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
-        verify(financialServiceClient, never()).getBalance(any(), anyString());
+        verify(financialServiceClient, never()).getBalance(any(), any(java.util.UUID.class));
     }
 
     @Test
@@ -96,7 +95,7 @@ class BalanceIntegrationTest {
                 "/api/v1/tontines/999999/balance", UUID.randomUUID());
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
-        verify(financialServiceClient, never()).getBalance(any(), anyString());
+        verify(financialServiceClient, never()).getBalance(any(), any(java.util.UUID.class));
     }
 
     @Test
@@ -105,7 +104,7 @@ class BalanceIntegrationTest {
                 "/api/v1/tontines/1/balance", String.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
-        verify(financialServiceClient, never()).getBalance(any(), anyString());
+        verify(financialServiceClient, never()).getBalance(any(), any(java.util.UUID.class));
     }
 
     @Test
@@ -128,7 +127,7 @@ class BalanceIntegrationTest {
     void getBalance_whenFinancialServiceFails_returnsConflict_sameConventionAsExistingHandler() {
         UUID creator = UUID.randomUUID();
         Long tontineId = createTontineAndGetId(creator);
-        when(financialServiceClient.getBalance(eq(tontineId), anyString()))
+        when(financialServiceClient.getBalance(eq(tontineId), any(java.util.UUID.class)))
                 .thenThrow(new IllegalStateException("Échec de la consultation du solde auprès de financial-service"));
 
         ResponseEntity<String> response = exchangeWithBearer(
@@ -141,7 +140,7 @@ class BalanceIntegrationTest {
     void getStatement_asCreator_returnsLinesFromFinancialService() {
         UUID creator = UUID.randomUUID();
         Long tontineId = createTontineAndGetId(creator);
-        when(financialServiceClient.getStatement(eq(tontineId), anyString())).thenReturn(List.of(
+        when(financialServiceClient.getStatement(eq(tontineId), any(java.util.UUID.class))).thenReturn(List.of(
                 new LedgerLineResponse("CONTRIBUTION_RECORDED", "Contribution round 1 tontine " + tontineId,
                         new BigDecimal("1000.00"), BigDecimal.ZERO, "MRU", Instant.now())));
 
@@ -150,7 +149,7 @@ class BalanceIntegrationTest {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody()).contains("CONTRIBUTION_RECORDED").contains("1000.00");
-        verify(financialServiceClient).getStatement(eq(tontineId), anyString());
+        verify(financialServiceClient).getStatement(eq(tontineId), any(java.util.UUID.class));
     }
 
     @Test
@@ -162,7 +161,7 @@ class BalanceIntegrationTest {
                 "/api/v1/tontines/" + tontineId + "/statement", UUID.randomUUID());
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
-        verify(financialServiceClient, never()).getStatement(any(), anyString());
+        verify(financialServiceClient, never()).getStatement(any(), any(java.util.UUID.class));
     }
 
     @Test
@@ -171,7 +170,7 @@ class BalanceIntegrationTest {
                 "/api/v1/tontines/999999/statement", UUID.randomUUID());
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
-        verify(financialServiceClient, never()).getStatement(any(), anyString());
+        verify(financialServiceClient, never()).getStatement(any(), any(java.util.UUID.class));
     }
 
     @Test
@@ -180,7 +179,7 @@ class BalanceIntegrationTest {
                 "/api/v1/tontines/1/statement", String.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
-        verify(financialServiceClient, never()).getStatement(any(), anyString());
+        verify(financialServiceClient, never()).getStatement(any(), any(java.util.UUID.class));
     }
 
     private Long createTontineAndGetId(UUID creator) {

@@ -2,6 +2,7 @@ package com.tontiflow.infrastructure.client;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import com.tontiflow.security.jwt.ServiceTokenCodec;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockHttpServletRequest;
@@ -13,6 +14,7 @@ import java.io.IOException;
 import java.math.BigDecimal;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -36,6 +38,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class FinancialServiceClientTest {
 
+    private static final String TEST_SECRET = "tontine-client-test-only-secret-0123456789";
+    private static final java.util.UUID ON_BEHALF_OF = java.util.UUID.randomUUID();
+
+    private final ServiceTokenCodec codec = new ServiceTokenCodec(TEST_SECRET, Clock.systemUTC());
+
     private HttpServer httpServer;
 
     @AfterEach
@@ -50,7 +57,7 @@ class FinancialServiceClientTest {
     }
 
     @Test
-    void getBalance_sendsCorrectRequestAndAuthorizationHeader_andParsesResponse() throws IOException {
+    void getBalance_sendsCorrectRequestAndServiceToken_andParsesResponse() throws IOException {
         AtomicReference<String> receivedPath = new AtomicReference<>();
         AtomicReference<String> receivedAuthorization = new AtomicReference<>();
         AtomicReference<String> receivedMethod = new AtomicReference<>();
@@ -64,14 +71,19 @@ class FinancialServiceClientTest {
         });
         httpServer.start();
 
-        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort());
+        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort(), codec);
 
-        AccountBalanceResponse response = client.getBalance(10L, "Bearer real-caller-token");
+        AccountBalanceResponse response = client.getBalance(10L, ON_BEHALF_OF);
 
         assertThat(receivedMethod.get()).isEqualTo("GET");
         assertThat(receivedPath.get()).isEqualTo("/internal/accounts/10/TONTINE/balance");
-        // Transmission verbatim du JWT de l'appelant original (decision R3/R27) - jamais parse, jamais reconstruit.
-        assertThat(receivedAuthorization.get()).isEqualTo("Bearer real-caller-token");
+        // Decision F-8 : jeton de service (HS256, portee de lecture) - jamais le JWT de l'utilisateur.
+        assertThat(receivedAuthorization.get()).startsWith("Bearer ");
+        ServiceTokenCodec.ServiceTokenClaims claims = codec.verify(
+                receivedAuthorization.get().substring("Bearer ".length()),
+                ServiceTokenCodec.SERVICE_TONTINE, ServiceTokenCodec.SERVICE_FINANCIAL);
+        assertThat(claims.scopes()).containsExactly(ServiceTokenCodec.SCOPE_LEDGER_READ);
+        assertThat(claims.onBehalfOf()).isEqualTo(ON_BEHALF_OF);
         assertThat(response.currency()).isEqualTo("MRU");
         assertThat(response.balance()).isEqualByComparingTo("700.00");
     }
@@ -87,9 +99,9 @@ class FinancialServiceClientTest {
         });
         httpServer.start();
 
-        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort());
+        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort(), codec);
 
-        AccountBalanceResponse response = client.getMemberBalance(100L, "Bearer irrelevant");
+        AccountBalanceResponse response = client.getMemberBalance(100L, ON_BEHALF_OF);
 
         assertThat(receivedPath.get()).isEqualTo("/internal/accounts/100/MEMBER/balance");
         assertThat(response.balance()).isEqualByComparingTo("-500.00");
@@ -108,9 +120,9 @@ class FinancialServiceClientTest {
                 """));
         httpServer.start();
 
-        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort());
+        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort(), codec);
 
-        List<LedgerLineResponse> lines = client.getStatement(10L, "Bearer irrelevant");
+        List<LedgerLineResponse> lines = client.getStatement(10L, ON_BEHALF_OF);
 
         assertThat(lines).hasSize(2);
         assertThat(lines.get(0).eventType()).isEqualTo("CONTRIBUTION_RECORDED");
@@ -128,9 +140,9 @@ class FinancialServiceClientTest {
                 """));
         httpServer.start();
 
-        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort());
+        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort(), codec);
 
-        List<LedgerLineResponse> lines = client.getMemberStatement(100L, "Bearer irrelevant");
+        List<LedgerLineResponse> lines = client.getMemberStatement(100L, ON_BEHALF_OF);
 
         assertThat(lines).hasSize(1);
         assertThat(lines.get(0).credit()).isEqualByComparingTo("1200.00");
@@ -147,9 +159,9 @@ class FinancialServiceClientTest {
         });
         httpServer.start();
 
-        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort());
+        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort(), codec);
 
-        assertThatThrownBy(() -> client.getBalance(10L, "Bearer irrelevant"))
+        assertThatThrownBy(() -> client.getBalance(10L, ON_BEHALF_OF))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageNotContaining("internal error")
                 // Decision R14-B3-B (§4) : la cause technique exacte - ici une vraie
@@ -173,9 +185,9 @@ class FinancialServiceClientTest {
         });
         httpServer.start();
 
-        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort());
+        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort(), codec);
 
-        assertThatThrownBy(() -> client.getStatement(10L, "Bearer irrelevant"))
+        assertThatThrownBy(() -> client.getStatement(10L, ON_BEHALF_OF))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageNotContaining("internal error");
     }
@@ -196,8 +208,8 @@ class FinancialServiceClientTest {
         incomingRequest.addHeader("X-Correlation-ID", "abc-123-real-request");
         RequestContextHolder.setRequestAttributes(new ServletRequestAttributes(incomingRequest));
 
-        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort());
-        client.recordContribution(1L, 1L, 1L, new BigDecimal("500.00"), "Bearer irrelevant");
+        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort(), codec);
+        client.recordContribution(1L, 1L, 1L, new BigDecimal("500.00"), ON_BEHALF_OF);
 
         assertThat(receivedCorrelationId.get()).isEqualTo("abc-123-real-request");
     }
@@ -217,8 +229,8 @@ class FinancialServiceClientTest {
         incomingRequest.addHeader("X-Correlation-ID", "def-456-real-request");
         RequestContextHolder.setRequestAttributes(new ServletRequestAttributes(incomingRequest));
 
-        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort());
-        client.getBalance(10L, "Bearer irrelevant");
+        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort(), codec);
+        client.getBalance(10L, ON_BEHALF_OF);
 
         assertThat(receivedCorrelationId.get()).isEqualTo("def-456-real-request");
     }
@@ -240,11 +252,79 @@ class FinancialServiceClientTest {
         // Decision R14-B3-B (§3) : aucun contexte de requete entrante actif ici -
         // comportement deja etabli avant cette decision, ne doit jamais generer
         // un identifiant de remplacement.
-        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort());
-        client.recordContribution(1L, 1L, 1L, new BigDecimal("500.00"), "Bearer irrelevant");
+        FinancialServiceClient client = new FinancialServiceClient("http://localhost:" + httpServer.getAddress().getPort(), codec);
+        client.recordContribution(1L, 1L, 1L, new BigDecimal("500.00"), ON_BEHALF_OF);
 
         assertThat(headerPresent.get()).isFalse();
         assertThat(receivedCorrelationId.get()).isNull();
+    }
+
+    // ------------------------------------------------------------------
+    // Decision F-8 : jeton de service par appel, portee selon la methode, aucun JWT utilisateur transmis.
+    // ------------------------------------------------------------------
+
+    @Test
+    void recordContribution_sendsWriteScopedServiceToken_withCallerAsOnBehalfOf() throws IOException {
+        AtomicReference<String> receivedAuthorization = new AtomicReference<>();
+        httpServer = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        httpServer.createContext("/internal/contributions", exchange -> {
+            receivedAuthorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+        httpServer.start();
+
+        FinancialServiceClient client = new FinancialServiceClient(
+                "http://localhost:" + httpServer.getAddress().getPort(), codec);
+        client.recordContribution(1L, 1L, 1L, new BigDecimal("500.00"), ON_BEHALF_OF);
+
+        ServiceTokenCodec.ServiceTokenClaims claims = codec.verify(
+                receivedAuthorization.get().substring("Bearer ".length()),
+                ServiceTokenCodec.SERVICE_TONTINE, ServiceTokenCodec.SERVICE_FINANCIAL);
+        assertThat(claims.scopes()).containsExactly(ServiceTokenCodec.SCOPE_LEDGER_WRITE);
+        assertThat(claims.onBehalfOf()).isEqualTo(ON_BEHALF_OF);
+        assertThat(claims.subject()).isEqualTo("service:tontine-service");
+    }
+
+    @Test
+    void everyCall_issuesAFreshShortLivedToken() throws IOException {
+        java.util.List<String> tokens = new java.util.concurrent.CopyOnWriteArrayList<>();
+        httpServer = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        httpServer.createContext("/internal/accounts/10/TONTINE/balance", exchange -> {
+            tokens.add(exchange.getRequestHeaders().getFirst("Authorization"));
+            writeJson(exchange, 200, "{\"currency\":\"MRU\",\"balance\":0.00}");
+        });
+        httpServer.start();
+
+        FinancialServiceClient client = new FinancialServiceClient(
+                "http://localhost:" + httpServer.getAddress().getPort(), codec);
+        client.getBalance(10L, ON_BEHALF_OF);
+        client.getBalance(10L, ON_BEHALF_OF);
+
+        assertThat(tokens).hasSize(2);
+        assertThat(tokens.get(0)).isNotEqualTo(tokens.get(1));
+    }
+
+    @Test
+    void userAuthorizationHeaderOfTheIncomingRequest_isNeverForwarded() throws IOException {
+        AtomicReference<String> receivedAuthorization = new AtomicReference<>();
+        httpServer = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        httpServer.createContext("/internal/accounts/10/TONTINE/balance", exchange -> {
+            receivedAuthorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
+            writeJson(exchange, 200, "{\"currency\":\"MRU\",\"balance\":0.00}");
+        });
+        httpServer.start();
+
+        MockHttpServletRequest incomingRequest = new MockHttpServletRequest();
+        incomingRequest.addHeader("Authorization", "Bearer user-jwt-must-not-leak");
+        RequestContextHolder.setRequestAttributes(new ServletRequestAttributes(incomingRequest));
+
+        FinancialServiceClient client = new FinancialServiceClient(
+                "http://localhost:" + httpServer.getAddress().getPort(), codec);
+        client.getBalance(10L, ON_BEHALF_OF);
+
+        assertThat(receivedAuthorization.get()).doesNotContain("user-jwt-must-not-leak");
+        assertThat(receivedAuthorization.get()).startsWith("Bearer ");
     }
 
     private static void writeJson(HttpExchange exchange, int status, String json) throws IOException {

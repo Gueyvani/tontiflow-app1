@@ -37,6 +37,12 @@ jwt:
 financial-service:
   url: ${FINANCIAL_SERVICE_URL:http://localhost:8083}
 
+# Secret partage des jetons de service (decision F-8) : identifie tontine-service aupres de
+# financial-service. Aucune valeur par defaut : demarrage en echec s'il est absent ou de moins de
+# 32 octets. Ne jamais journaliser ni versionner de valeur reelle (voir .env.app.example).
+internal-service-token:
+  secret: ${INTERNAL_SERVICE_TOKEN_SECRET}
+
 # Rate limiting local (in-JVM) de POST /api/v1/tontines/{tontineId}/members/claim
 # (decisions R21-A / R21-B, option B ; dimension IP deplacee vers api-gateway
 # en R21-C.A3.2). Compteur a fenetre glissante d'une minute, par compte

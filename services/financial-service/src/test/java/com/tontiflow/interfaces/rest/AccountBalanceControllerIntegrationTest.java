@@ -3,12 +3,11 @@ package com.tontiflow.interfaces.rest;
 import com.tontiflow.application.service.ContributionService;
 import com.tontiflow.application.service.DisbursementService;
 import com.tontiflow.domain.enums.Currency;
-import com.tontiflow.infrastructure.security.JwtTestSecurityConfiguration;
+import com.tontiflow.infrastructure.security.ServiceTokenTestConfiguration;
+import com.tontiflow.security.jwt.ServiceTokenCodec;
 import com.tontiflow.interfaces.rest.dto.AccountBalanceResponse;
 import com.tontiflow.interfaces.rest.dto.LedgerLineResponse;
-import com.tontiflow.security.jwt.JwtClaimNames;
 import org.springframework.core.ParameterizedTypeReference;
-import io.jsonwebtoken.Jwts;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -21,14 +20,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.ActiveProfiles;
 
 import java.math.BigDecimal;
-import java.security.KeyPair;
-import java.security.KeyPairGenerator;
-import java.time.Instant;
-import java.time.temporal.ChronoUnit;
-import java.util.Date;
 import java.util.List;
-import java.util.Set;
-import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -44,13 +36,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("test")
-@Import(JwtTestSecurityConfiguration.class)
+@Import(ServiceTokenTestConfiguration.class)
 class AccountBalanceControllerIntegrationTest {
 
     @Autowired
     private TestRestTemplate restTemplate;
     @Autowired
-    private KeyPair jwtTestKeyPair;
+    private ServiceTokenCodec serviceTokenCodec;
     @Autowired
     private ContributionService contributionService;
     @Autowired
@@ -100,11 +92,9 @@ class AccountBalanceControllerIntegrationTest {
     }
 
     @Test
-    void getBalance_withInvalidJwt_isRejectedWithUnauthorized() throws Exception {
-        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
-        generator.initialize(2048);
-        KeyPair untrustedKeyPair = generator.generateKeyPair();
-        String tokenSignedByUntrustedKey = buildToken(untrustedKeyPair);
+    void getBalance_withTokenSignedByAnotherSecret_isRejectedWithUnauthorized() {
+        String tokenSignedByUntrustedKey = ServiceTokenTestConfiguration.readToken(new ServiceTokenCodec(
+                "another-secret-another-secret-0123456789", java.time.Clock.systemUTC()));
 
         HttpHeaders headers = new HttpHeaders();
         headers.setBearerAuth(tokenSignedByUntrustedKey);
@@ -128,7 +118,7 @@ class AccountBalanceControllerIntegrationTest {
         // test erronee, pas un bug applicatif. Reste un refus client sans fuite
         // d'information, coherent avec la convention deja etablie (IllegalArgumentException -> 404).
         HttpHeaders headers = new HttpHeaders();
-        headers.setBearerAuth(buildToken(jwtTestKeyPair));
+        headers.setBearerAuth(ServiceTokenTestConfiguration.readToken(serviceTokenCodec));
         HttpEntity<Void> entity = new HttpEntity<>(headers);
 
         ResponseEntity<String> response = restTemplate.exchange(
@@ -178,7 +168,7 @@ class AccountBalanceControllerIntegrationTest {
 
     private ResponseEntity<List<LedgerLineResponse>> getLinesWithBearer(Long ownerReference, String accountType) {
         HttpHeaders headers = new HttpHeaders();
-        headers.setBearerAuth(buildToken(jwtTestKeyPair));
+        headers.setBearerAuth(ServiceTokenTestConfiguration.readToken(serviceTokenCodec));
         HttpEntity<Void> entity = new HttpEntity<>(headers);
         return restTemplate.exchange(
                 "/internal/accounts/" + ownerReference + "/" + accountType + "/lines",
@@ -188,26 +178,11 @@ class AccountBalanceControllerIntegrationTest {
 
     private ResponseEntity<AccountBalanceResponse> getBalanceWithBearer(Long ownerReference, String accountType) {
         HttpHeaders headers = new HttpHeaders();
-        headers.setBearerAuth(buildToken(jwtTestKeyPair));
+        headers.setBearerAuth(ServiceTokenTestConfiguration.readToken(serviceTokenCodec));
         HttpEntity<Void> entity = new HttpEntity<>(headers);
         return restTemplate.exchange(
                 "/internal/accounts/" + ownerReference + "/" + accountType + "/balance",
                 org.springframework.http.HttpMethod.GET, entity, AccountBalanceResponse.class);
     }
 
-    private static String buildToken(KeyPair signingKeyPair) {
-        Instant now = Instant.now();
-        return Jwts.builder()
-                .claim(JwtClaimNames.SUBJECT, UUID.randomUUID().toString())
-                .claim(JwtClaimNames.ISSUED_AT, Date.from(now))
-                .claim(JwtClaimNames.EXPIRATION, Date.from(now.plus(15, ChronoUnit.MINUTES)))
-                .claim(JwtClaimNames.JWT_ID, UUID.randomUUID().toString())
-                .claim(JwtClaimNames.ISSUER, "authentication-service")
-                .claim(JwtClaimNames.USERNAME, "creator")
-                .claim(JwtClaimNames.EMAIL, "creator@tontiflow.test")
-                .claim(JwtClaimNames.ROLES, List.copyOf(Set.of("ROLE_USER")))
-                .claim(JwtClaimNames.PERMISSIONS, List.copyOf(Set.<String>of()))
-                .signWith(signingKeyPair.getPrivate(), Jwts.SIG.RS256)
-                .compact();
-    }
 }

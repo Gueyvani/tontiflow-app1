@@ -175,9 +175,9 @@ services:
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/financial_db
       DB_PASSWORD: ${POSTGRES_PASSWORD:?}
-      JWT_PUBLIC_KEY_PATH: file:/keys/public_key.pem
-    volumes:
-      - ./docker/keys:/keys:ro
+      # Secret partage des jetons de service (decision F-8) : authentifie tontine-service,
+      # seul appelant de /internal/**. Obligatoire, >= 32 octets (voir .env.app.example).
+      INTERNAL_SERVICE_TOKEN_SECRET: ${INTERNAL_SERVICE_TOKEN_SECRET:?INTERNAL_SERVICE_TOKEN_SECRET doit etre defini dans .env.app}
     networks: [tontiflow-net]
     # Pas de port publie (point critique R12) : financial-service n'est
     # joignable que via le reseau Docker interne (tontine-service, Gateway
@@ -205,6 +205,8 @@ services:
       DB_PASSWORD: ${POSTGRES_PASSWORD:?}
       JWT_PUBLIC_KEY_PATH: file:/keys/public_key.pem
       FINANCIAL_SERVICE_URL: http://financial-service:8083
+      # Meme secret que financial-service (decision F-8) : signe les jetons de service courts.
+      INTERNAL_SERVICE_TOKEN_SECRET: ${INTERNAL_SERVICE_TOKEN_SECRET:?INTERNAL_SERVICE_TOKEN_SECRET doit etre defini dans .env.app}
     volumes:
       - ./docker/keys:/keys:ro
     networks: [tontiflow-net]

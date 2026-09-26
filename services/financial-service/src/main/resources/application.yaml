@@ -26,8 +26,11 @@ spring:
 # Securite JWT (RS256) : verification locale uniquement, aucune cle privee.
 # Emplacement externalise via variable d'environnement - aucune valeur par
 # defaut, aucune cle committee. Absence de variable = echec explicite au demarrage.
-jwt:
-  public-key-location: ${JWT_PUBLIC_KEY_PATH}
+# Secret partage des jetons de service (decision F-8) : authentifie tontine-service, seul
+# appelant des endpoints /internal/**. Aucune valeur par defaut : demarrage en echec s'il est
+# absent ou de moins de 32 octets. Ne jamais journaliser ni versionner de valeur reelle.
+internal-service-token:
+  secret: ${INTERNAL_SERVICE_TOKEN_SECRET}
 
 # Actuator limite au strict necessaire pour permettre une sonde de sante sans
 # JWT (orchestration - Docker/K8s) sans exposer d'informations sensibles

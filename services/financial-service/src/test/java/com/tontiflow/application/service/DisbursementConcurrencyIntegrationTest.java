@@ -4,7 +4,7 @@ import com.tontiflow.domain.enums.Currency;
 import com.tontiflow.domain.model.JournalEntry;
 import com.tontiflow.infrastructure.repository.JournalEntryRepository;
 import com.tontiflow.infrastructure.repository.LedgerLineRepository;
-import com.tontiflow.infrastructure.security.JwtTestSecurityConfiguration;
+import com.tontiflow.infrastructure.security.ServiceTokenTestConfiguration;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -34,7 +34,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 @ActiveProfiles("test")
-@Import(JwtTestSecurityConfiguration.class)
+@Import(ServiceTokenTestConfiguration.class)
 class DisbursementConcurrencyIntegrationTest {
 
     @Autowired

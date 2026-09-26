@@ -22,3 +22,8 @@ spring:
 # explicitement un seuil bas.
 claim-rate-limit:
   account-per-minute: 1000000
+
+# Secret de jeton de service (decision F-8) : valeur de TEST uniquement, active seulement sous le
+# profil test (H2, comme le reste de ce fichier) ; jamais utilisee en production.
+internal-service-token:
+  secret: tontine-service-test-only-secret-0123456789

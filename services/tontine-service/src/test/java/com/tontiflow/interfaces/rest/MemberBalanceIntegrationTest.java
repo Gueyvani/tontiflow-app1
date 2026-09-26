@@ -35,7 +35,6 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -71,7 +70,7 @@ class MemberBalanceIntegrationTest {
         UUID creator = UUID.randomUUID();
         Long tontineId = createTontineAndGetId(creator);
         Long memberId = createMemberAndGetId(tontineId);
-        when(financialServiceClient.getMemberBalance(eq(memberId), anyString()))
+        when(financialServiceClient.getMemberBalance(eq(memberId), any(java.util.UUID.class)))
                 .thenReturn(new AccountBalanceResponse("MRU", new BigDecimal("300.00")));
 
         ResponseEntity<String> response = exchangeWithBearer(
@@ -79,7 +78,7 @@ class MemberBalanceIntegrationTest {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody()).contains("300.00").contains("MRU");
-        verify(financialServiceClient).getMemberBalance(eq(memberId), anyString());
+        verify(financialServiceClient).getMemberBalance(eq(memberId), any(java.util.UUID.class));
     }
 
     @Test
@@ -92,7 +91,7 @@ class MemberBalanceIntegrationTest {
                 "/api/v1/tontines/" + tontineId + "/members/" + memberId + "/balance", UUID.randomUUID());
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
-        verify(financialServiceClient, never()).getMemberBalance(any(), anyString());
+        verify(financialServiceClient, never()).getMemberBalance(any(), any(java.util.UUID.class));
     }
 
     @Test
@@ -108,7 +107,7 @@ class MemberBalanceIntegrationTest {
                 "/api/v1/tontines/" + tontineA + "/members/" + memberOfB + "/balance", creatorA);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
-        verify(financialServiceClient, never()).getMemberBalance(any(), anyString());
+        verify(financialServiceClient, never()).getMemberBalance(any(), any(java.util.UUID.class));
     }
 
     @Test
@@ -120,7 +119,7 @@ class MemberBalanceIntegrationTest {
                 "/api/v1/tontines/" + tontineId + "/members/999999/balance", creator);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
-        verify(financialServiceClient, never()).getMemberBalance(any(), anyString());
+        verify(financialServiceClient, never()).getMemberBalance(any(), any(java.util.UUID.class));
     }
 
     @Test
@@ -129,7 +128,7 @@ class MemberBalanceIntegrationTest {
                 "/api/v1/tontines/1/members/1/balance", String.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
-        verify(financialServiceClient, never()).getMemberBalance(any(), anyString());
+        verify(financialServiceClient, never()).getMemberBalance(any(), any(java.util.UUID.class));
     }
 
     @Test
@@ -137,7 +136,7 @@ class MemberBalanceIntegrationTest {
         UUID creator = UUID.randomUUID();
         Long tontineId = createTontineAndGetId(creator);
         Long memberId = createMemberAndGetId(tontineId);
-        when(financialServiceClient.getMemberStatement(eq(memberId), anyString())).thenReturn(List.of(
+        when(financialServiceClient.getMemberStatement(eq(memberId), any(java.util.UUID.class))).thenReturn(List.of(
                 new LedgerLineResponse("DISBURSEMENT_RECORDED", "Versement round 1 tontine " + tontineId,
                         BigDecimal.ZERO, new BigDecimal("300.00"), "MRU", Instant.now())));
 
@@ -146,7 +145,7 @@ class MemberBalanceIntegrationTest {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody()).contains("DISBURSEMENT_RECORDED").contains("300.00");
-        verify(financialServiceClient).getMemberStatement(eq(memberId), anyString());
+        verify(financialServiceClient).getMemberStatement(eq(memberId), any(java.util.UUID.class));
     }
 
     @Test
@@ -159,7 +158,7 @@ class MemberBalanceIntegrationTest {
                 "/api/v1/tontines/" + tontineId + "/members/" + memberId + "/statement", UUID.randomUUID());
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
-        verify(financialServiceClient, never()).getMemberStatement(any(), anyString());
+        verify(financialServiceClient, never()).getMemberStatement(any(), any(java.util.UUID.class));
     }
 
     @Test
@@ -175,7 +174,7 @@ class MemberBalanceIntegrationTest {
                 "/api/v1/tontines/" + tontineA + "/members/" + memberOfB + "/statement", creatorA);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
-        verify(financialServiceClient, never()).getMemberStatement(any(), anyString());
+        verify(financialServiceClient, never()).getMemberStatement(any(), any(java.util.UUID.class));
     }
 
     @Test
@@ -184,7 +183,7 @@ class MemberBalanceIntegrationTest {
                 "/api/v1/tontines/1/members/1/statement", String.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
-        verify(financialServiceClient, never()).getMemberStatement(any(), anyString());
+        verify(financialServiceClient, never()).getMemberStatement(any(), any(java.util.UUID.class));
     }
 
     private Long createTontineAndGetId(UUID creator) {

@@ -1,11 +1,11 @@
 package com.tontiflow.infrastructure.security;
 
-import com.tontiflow.infrastructure.security.jwt.JwtVerifier;
+import com.tontiflow.security.jwt.ServiceTokenCodec;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
-import org.springframework.core.io.Resource;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
@@ -14,42 +14,45 @@ import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.HttpStatusEntryPoint;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 
+import java.time.Clock;
+
 /**
- * Configuration Spring Security de {@code financial-service} — socle
- * d'authentification JWT local, calqué sur le patron déjà validé de
- * {@code user-service} et {@code tontine-service}.
+ * Configuration Spring Security de {@code financial-service} (décision F-8).
  *
- * <p>Remplace l'auto-configuration Spring Boot par défaut par une chaîne de
- * filtres strictement stateless authentifiant via Access Token JWT (RS256),
- * en parité exacte avec le contrat déjà validé côté
- * {@code authentication-service} et {@code api-gateway}. Aucune règle RBAC
- * métier n'est introduite ici : {@code financial-service} ne possède encore
- * aucun contrôleur métier.</p>
+ * <p>{@code financial-service} est un service <b>interne</b> : son seul appelant
+ * est {@code tontine-service}, qui s'identifie par un <b>jeton de service</b>
+ * HS256 court ({@link ServiceTokenCodec}) et non plus par le JWT de
+ * l'utilisateur. Un JWT utilisateur n'est plus accepté sur {@code /internal/**} :
+ * il n'existe aucun endpoint utilisateur ici, et l'autorisation métier (créateur,
+ * appartenance) reste exécutée par {@code tontine-service} avant tout appel.</p>
+ *
+ * <p>Portées : {@code ledger.write} pour les écritures (POST), {@code ledger.read}
+ * pour les lectures (GET). Toute autre requête est refusée.</p>
  */
 @Configuration
 @EnableWebSecurity
 public class SecurityConfig {
 
     /**
-     * Résout la clé publique RSA de vérification JWT depuis
-     * {@code jwt.public-key-location}. Absent en profil {@code test}, où
-     * {@code JwtTestSecurityConfiguration} fournit une paire de clés
-     * éphémère à la place — évite tout conflit de définition de bean.
+     * Secret partagé des jetons de service ({@code internal-service-token.secret}) :
+     * démarrage en échec s'il est absent ou trop court. Absent en profil {@code test},
+     * où {@code ServiceTokenTestConfiguration} fournit un codec à secret de test.
      */
     @Bean
     @Profile("!test")
-    public JwtVerifier jwtVerifier(@Value("${jwt.public-key-location}") Resource publicKeyLocation) {
-        return JwtVerifier.fromPublicKeyResource(publicKeyLocation);
+    public ServiceTokenCodec serviceTokenCodec(@Value("${internal-service-token.secret}") String secret, Clock clock) {
+        return new ServiceTokenCodec(secret, clock);
     }
 
     @Bean
-    public SecurityFilterChain securityFilterChain(HttpSecurity http, JwtVerifier jwtVerifier) throws Exception {
+    public SecurityFilterChain securityFilterChain(HttpSecurity http, ServiceTokenCodec serviceTokenCodec)
+            throws Exception {
         http
                 // API stateless (aucune session, aucun cookie) : le CSRF n'a pas de sens ici.
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 // Sans httpBasic()/formLogin(), Spring Security repondrait 403 par defaut
-                // faute de point d'entree explicite : on force 401, coherent avec une API JWT.
+                // faute de point d'entree explicite : on force 401, coherent avec une API a jeton.
                 .exceptionHandling(exceptions -> exceptions
                         .authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED)))
                 .authorizeHttpRequests(authorize -> authorize
@@ -60,15 +63,20 @@ public class SecurityConfig {
                         // dans authentication-service, user-service et tontine-service).
                         .requestMatchers("/error").permitAll()
                         // /actuator/health public (decision R11, corrections techniques) : une
-                        // sonde d'orchestration (Docker/K8s) ne peut pas fournir de JWT. Perimetre
+                        // sonde d'orchestration (Docker/K8s) ne peut pas fournir de jeton. Perimetre
                         // strictement limite a ce seul endpoint - management.endpoints.web.exposure
                         // (application.yaml) n'expose que "health" et masque tout detail
-                        // (show-details: never) ; tout le reste de /actuator/** (non expose de
-                        // toute facon) resterait couvert par anyRequest().authenticated() ci-dessous.
+                        // (show-details: never).
                         .requestMatchers("/actuator/health").permitAll()
-                        .anyRequest().authenticated())
+                        // Endpoints internes (decision F-8) : portee exigee par methode.
+                        .requestMatchers(HttpMethod.POST, "/internal/contributions", "/internal/disbursements")
+                        .hasAuthority("SCOPE_" + ServiceTokenCodec.SCOPE_LEDGER_WRITE)
+                        .requestMatchers(HttpMethod.GET, "/internal/accounts/**")
+                        .hasAuthority("SCOPE_" + ServiceTokenCodec.SCOPE_LEDGER_READ)
+                        // Aucun autre endpoint : tout le reste est refuse.
+                        .anyRequest().denyAll())
                 .addFilterBefore(
-                        new JwtAuthenticationFilter(jwtVerifier),
+                        new ServiceTokenAuthenticationFilter(serviceTokenCodec),
                         UsernamePasswordAuthenticationFilter.class);
 
         return http.build();

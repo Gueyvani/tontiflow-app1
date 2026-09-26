@@ -50,9 +50,9 @@ public class BalanceApplicationService {
      * @throws org.springframework.security.access.AccessDeniedException si {@code callerUserId}
      *                                   n'est pas le créateur de {@code tontineId}
      */
-    public AccountBalanceResponse getTontineBalance(Long tontineId, UUID callerUserId, String authorizationHeader) {
+    public AccountBalanceResponse getTontineBalance(Long tontineId, UUID callerUserId) {
         requireCreatorOfTontine(tontineId, callerUserId);
-        return financialServiceClient.getBalance(tontineId, authorizationHeader);
+        return financialServiceClient.getBalance(tontineId, callerUserId);
     }
 
     /**
@@ -64,9 +64,9 @@ public class BalanceApplicationService {
      * @throws org.springframework.security.access.AccessDeniedException si {@code callerUserId}
      *                                   n'est pas le créateur de {@code tontineId}
      */
-    public List<LedgerLineResponse> getTontineStatement(Long tontineId, UUID callerUserId, String authorizationHeader) {
+    public List<LedgerLineResponse> getTontineStatement(Long tontineId, UUID callerUserId) {
         requireCreatorOfTontine(tontineId, callerUserId);
-        return financialServiceClient.getStatement(tontineId, authorizationHeader);
+        return financialServiceClient.getStatement(tontineId, callerUserId);
     }
 
     /**
@@ -83,10 +83,9 @@ public class BalanceApplicationService {
      * @throws org.springframework.security.access.AccessDeniedException si {@code callerUserId}
      *                                   n'est pas le créateur de {@code tontineId}
      */
-    public AccountBalanceResponse getMemberBalance(Long tontineId, Long memberId, UUID callerUserId,
-                                                    String authorizationHeader) {
+    public AccountBalanceResponse getMemberBalance(Long tontineId, Long memberId, UUID callerUserId) {
         requireMemberOfTontine(tontineId, memberId, callerUserId);
-        return financialServiceClient.getMemberBalance(memberId, authorizationHeader);
+        return financialServiceClient.getMemberBalance(memberId, callerUserId);
     }
 
     /**
@@ -99,10 +98,9 @@ public class BalanceApplicationService {
      * @throws org.springframework.security.access.AccessDeniedException si {@code callerUserId}
      *                                   n'est pas le créateur de {@code tontineId}
      */
-    public List<LedgerLineResponse> getMemberStatement(Long tontineId, Long memberId, UUID callerUserId,
-                                                         String authorizationHeader) {
+    public List<LedgerLineResponse> getMemberStatement(Long tontineId, Long memberId, UUID callerUserId) {
         requireMemberOfTontine(tontineId, memberId, callerUserId);
-        return financialServiceClient.getMemberStatement(memberId, authorizationHeader);
+        return financialServiceClient.getMemberStatement(memberId, callerUserId);
     }
 
     private void requireCreatorOfTontine(Long tontineId, UUID callerUserId) {

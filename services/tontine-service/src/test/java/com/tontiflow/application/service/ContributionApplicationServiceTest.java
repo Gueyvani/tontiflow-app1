@@ -77,10 +77,10 @@ class ContributionApplicationServiceTest {
         when(roundRepository.findById(10L)).thenReturn(Optional.of(round(10L, 1L, new BigDecimal("5000.00"))));
         when(memberRepository.findById(100L)).thenReturn(Optional.of(member(100L, 1L)));
 
-        TontineRound result = service.recordContribution(1L, 10L, 100L, creator, "Bearer test-token");
+        TontineRound result = service.recordContribution(1L, 10L, 100L, creator);
 
         assertThat(result.getAmount()).isEqualByComparingTo("5000.00");
-        verify(financialServiceClient).recordContribution(1L, 10L, 100L, new BigDecimal("5000.00"), "Bearer test-token");
+        verify(financialServiceClient).recordContribution(1L, 10L, 100L, new BigDecimal("5000.00"), creator);
     }
 
     // TEST 44.1 : non-createur -> refus, aucune ecriture financiere.
@@ -90,7 +90,7 @@ class ContributionApplicationServiceTest {
         UUID attacker = UUID.randomUUID();
         when(tontineRepository.findById(1L)).thenReturn(Optional.of(tontine(1L, creator)));
 
-        assertThatThrownBy(() -> service.recordContribution(1L, 10L, 100L, attacker, "Bearer test-token"))
+        assertThatThrownBy(() -> service.recordContribution(1L, 10L, 100L, attacker))
                 .isInstanceOf(AccessDeniedException.class);
 
         verifyNoInteractions(financialServiceClient, roundRepository, memberRepository);
@@ -103,7 +103,7 @@ class ContributionApplicationServiceTest {
         when(tontineRepository.findById(1L)).thenReturn(Optional.of(tontine(1L, creator)));
         when(roundRepository.findById(10L)).thenReturn(Optional.of(round(10L, 999L, new BigDecimal("5000.00"))));
 
-        assertThatThrownBy(() -> service.recordContribution(1L, 10L, 100L, creator, "Bearer test-token"))
+        assertThatThrownBy(() -> service.recordContribution(1L, 10L, 100L, creator))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("n'appartient pas");
 
@@ -119,7 +119,7 @@ class ContributionApplicationServiceTest {
         when(roundRepository.findById(10L)).thenReturn(Optional.of(round(10L, 1L, new BigDecimal("5000.00"))));
         when(memberRepository.findById(100L)).thenReturn(Optional.of(member(100L, 999L)));
 
-        assertThatThrownBy(() -> service.recordContribution(1L, 10L, 100L, creator, "Bearer test-token"))
+        assertThatThrownBy(() -> service.recordContribution(1L, 10L, 100L, creator))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("n'appartient pas");
 
@@ -130,7 +130,7 @@ class ContributionApplicationServiceTest {
     void recordContribution_withUnknownTontine_throwsIllegalArgumentException() {
         when(tontineRepository.findById(1L)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> service.recordContribution(1L, 10L, 100L, UUID.randomUUID(), "Bearer test-token"))
+        assertThatThrownBy(() -> service.recordContribution(1L, 10L, 100L, UUID.randomUUID()))
                 .isInstanceOf(IllegalArgumentException.class);
 
         verifyNoInteractions(financialServiceClient);
@@ -142,7 +142,7 @@ class ContributionApplicationServiceTest {
         when(tontineRepository.findById(1L)).thenReturn(Optional.of(tontine(1L, creator)));
         when(roundRepository.findById(10L)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> service.recordContribution(1L, 10L, 100L, creator, "Bearer test-token"))
+        assertThatThrownBy(() -> service.recordContribution(1L, 10L, 100L, creator))
                 .isInstanceOf(IllegalArgumentException.class);
 
         verifyNoInteractions(financialServiceClient);
@@ -155,7 +155,7 @@ class ContributionApplicationServiceTest {
         when(roundRepository.findById(10L)).thenReturn(Optional.of(round(10L, 1L, new BigDecimal("5000.00"))));
         when(memberRepository.findById(100L)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> service.recordContribution(1L, 10L, 100L, creator, "Bearer test-token"))
+        assertThatThrownBy(() -> service.recordContribution(1L, 10L, 100L, creator))
                 .isInstanceOf(IllegalArgumentException.class);
 
         verifyNoInteractions(financialServiceClient);
@@ -170,7 +170,7 @@ class ContributionApplicationServiceTest {
         when(roundRepository.findById(10L)).thenReturn(Optional.of(round(10L, 1L, new BigDecimal("1234.56"))));
         when(memberRepository.findById(100L)).thenReturn(Optional.of(member(100L, 1L)));
 
-        service.recordContribution(1L, 10L, 100L, creator, "Bearer test-token");
+        service.recordContribution(1L, 10L, 100L, creator);
 
         verify(financialServiceClient).recordContribution(eq(1L), eq(10L), eq(100L), eq(new BigDecimal("1234.56")), any());
     }

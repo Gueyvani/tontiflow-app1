@@ -82,10 +82,10 @@ class DisbursementApplicationServiceTest {
         when(roundRepository.findById(10L)).thenReturn(Optional.of(round(10L, 1L, new BigDecimal("5000.00"), 100L)));
         when(memberRepository.findById(100L)).thenReturn(Optional.of(member(100L, MemberStatus.ACTIVE)));
 
-        TontineRound result = service.recordDisbursement(1L, 10L, creator, "Bearer test-token");
+        TontineRound result = service.recordDisbursement(1L, 10L, creator);
 
         assertThat(result.getAmount()).isEqualByComparingTo("5000.00");
-        verify(financialServiceClient).recordDisbursement(1L, 10L, 100L, new BigDecimal("5000.00"), "Bearer test-token");
+        verify(financialServiceClient).recordDisbursement(1L, 10L, 100L, new BigDecimal("5000.00"), creator);
     }
 
     @Test
@@ -94,7 +94,7 @@ class DisbursementApplicationServiceTest {
         UUID attacker = UUID.randomUUID();
         when(tontineRepository.findById(1L)).thenReturn(Optional.of(tontine(1L, creator)));
 
-        assertThatThrownBy(() -> service.recordDisbursement(1L, 10L, attacker, "Bearer test-token"))
+        assertThatThrownBy(() -> service.recordDisbursement(1L, 10L, attacker))
                 .isInstanceOf(AccessDeniedException.class);
 
         verifyNoInteractions(financialServiceClient, roundRepository);
@@ -106,7 +106,7 @@ class DisbursementApplicationServiceTest {
         when(tontineRepository.findById(1L)).thenReturn(Optional.of(tontine(1L, creator)));
         when(roundRepository.findById(10L)).thenReturn(Optional.of(round(10L, 999L, new BigDecimal("5000.00"), 100L)));
 
-        assertThatThrownBy(() -> service.recordDisbursement(1L, 10L, creator, "Bearer test-token"))
+        assertThatThrownBy(() -> service.recordDisbursement(1L, 10L, creator))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("n'appartient pas");
 
@@ -117,7 +117,7 @@ class DisbursementApplicationServiceTest {
     void recordDisbursement_withUnknownTontine_throwsIllegalArgumentException() {
         when(tontineRepository.findById(1L)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> service.recordDisbursement(1L, 10L, UUID.randomUUID(), "Bearer test-token"))
+        assertThatThrownBy(() -> service.recordDisbursement(1L, 10L, UUID.randomUUID()))
                 .isInstanceOf(IllegalArgumentException.class);
 
         verifyNoInteractions(financialServiceClient);
@@ -129,7 +129,7 @@ class DisbursementApplicationServiceTest {
         when(tontineRepository.findById(1L)).thenReturn(Optional.of(tontine(1L, creator)));
         when(roundRepository.findById(10L)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> service.recordDisbursement(1L, 10L, creator, "Bearer test-token"))
+        assertThatThrownBy(() -> service.recordDisbursement(1L, 10L, creator))
                 .isInstanceOf(IllegalArgumentException.class);
 
         verifyNoInteractions(financialServiceClient);
@@ -143,7 +143,7 @@ class DisbursementApplicationServiceTest {
         when(tontineRepository.findById(1L)).thenReturn(Optional.of(tontine(1L, creator)));
         when(roundRepository.findById(10L)).thenReturn(Optional.of(round(10L, 1L, new BigDecimal("5000.00"), null)));
 
-        assertThatThrownBy(() -> service.recordDisbursement(1L, 10L, creator, "Bearer test-token"))
+        assertThatThrownBy(() -> service.recordDisbursement(1L, 10L, creator))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("bénéficiaire");
 
@@ -159,7 +159,7 @@ class DisbursementApplicationServiceTest {
         when(roundRepository.findById(10L)).thenReturn(Optional.of(round(10L, 1L, new BigDecimal("1234.56"), 100L)));
         when(memberRepository.findById(100L)).thenReturn(Optional.of(member(100L, MemberStatus.ACTIVE)));
 
-        service.recordDisbursement(1L, 10L, creator, "Bearer test-token");
+        service.recordDisbursement(1L, 10L, creator);
 
         verify(financialServiceClient).recordDisbursement(eq(1L), eq(10L), eq(100L), eq(new BigDecimal("1234.56")), any());
     }
@@ -173,7 +173,7 @@ class DisbursementApplicationServiceTest {
         when(roundRepository.findById(10L)).thenReturn(Optional.of(round(10L, 1L, new BigDecimal("5000.00"), 100L)));
         when(memberRepository.findById(100L)).thenReturn(Optional.of(member(100L, MemberStatus.PENDING)));
 
-        assertThatThrownBy(() -> service.recordDisbursement(1L, 10L, creator, "Bearer test-token"))
+        assertThatThrownBy(() -> service.recordDisbursement(1L, 10L, creator))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("membre actif");
 

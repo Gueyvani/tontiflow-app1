@@ -1,5 +1,6 @@
 package com.tontiflow.infrastructure.client;
 
+import com.tontiflow.security.jwt.ServiceTokenCodec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -19,6 +20,7 @@ import org.springframework.web.context.request.ServletRequestAttributes;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * Client HTTP service-à-service vers {@code financial-service} (décision
@@ -34,14 +36,15 @@ import java.util.List;
  * <p>Timeout localisé à ce client uniquement (5 s connexion/lecture) — ne
  * modifie aucune configuration globale d'un autre service (§28).</p>
  *
- * <p>Le JWT de l'appelant original est transmis tel quel (jamais parsé, ni
- * loggé) : {@code financial-service} authentifie la requête via sa propre
- * chaîne {@code JwtAuthenticationFilter} déjà existante, sans aucune
- * modification de sa {@code SecurityConfig}. L'autorisation métier
- * (créateur, appartenance membre/round) reste entièrement de la
- * responsabilité de {@code tontine-service}, exécutée <i>avant</i> cet
- * appel — {@code financial-service} ne réévalue jamais cette autorisation,
- * il fait confiance à la validation déjà effectuée par l'appelant interne.</p>
+ * <p><b>Authentification (décision F-8)</b> : ce client s'identifie auprès de
+ * {@code financial-service} par un <b>jeton de service</b> HS256 court
+ * ({@link ServiceTokenCodec}, portée {@code ledger.write} pour les écritures,
+ * {@code ledger.read} pour les lectures), émis à chaque appel. Le JWT de
+ * l'utilisateur n'est <b>plus</b> transmis : l'identifiant de l'utilisateur
+ * n'est joint qu'à titre d'audit ({@code on_behalf_of}), jamais pour autoriser.
+ * L'autorisation métier (créateur, appartenance membre/round) reste entièrement
+ * de la responsabilité de {@code tontine-service}, exécutée <i>avant</i> cet
+ * appel — {@code financial-service} ne réévalue jamais cette autorisation.</p>
  *
  * <p><b>Décision R14-B3-B</b> : le {@code X-Correlation-ID} de la requête
  * HTTP entrante (déjà lu par {@code GlobalExceptionHandler} pour son propre
@@ -52,7 +55,7 @@ import java.util.List;
  * (code de statut, corps de réponse) reste strictement inchangé : la cause
  * technique exacte ({@link RestClientResponseException} avec son statut
  * source, vs {@link ResourceAccessException} réseau/timeout) est seulement
- * journalisée en interne (jamais le JWT/{@code Authorization}), jamais
+ * journalisée en interne (jamais le jeton/{@code Authorization}), jamais
  * exposée au client final.</p>
  */
 @Component
@@ -67,8 +70,11 @@ public class FinancialServiceClient {
     private static final Duration TIMEOUT = Duration.ofSeconds(5);
 
     private final RestClient restClient;
+    private final ServiceTokenCodec serviceTokenCodec;
 
-    public FinancialServiceClient(@Value("${financial-service.url:http://localhost:8083}") String baseUrl) {
+    public FinancialServiceClient(@Value("${financial-service.url:http://localhost:8083}") String baseUrl,
+                                   ServiceTokenCodec serviceTokenCodec) {
+        this.serviceTokenCodec = serviceTokenCodec;
         ClientHttpRequestFactorySettings settings = ClientHttpRequestFactorySettings.DEFAULTS
                 .withConnectTimeout(TIMEOUT)
                 .withReadTimeout(TIMEOUT);
@@ -88,13 +94,13 @@ public class FinancialServiceClient {
      * @throws IllegalStateException si l'appel échoue (réseau, timeout, erreur serveur)
      */
     public void recordContribution(Long tontineId, Long roundId, Long memberId, BigDecimal amount,
-                                    String authorizationHeader) {
+                                    UUID onBehalfOf) {
         RecordContributionPayload payload =
                 new RecordContributionPayload(tontineId, roundId, memberId, amount, CURRENCY_MRU);
         try {
             restClient.post()
                     .uri("/internal/contributions")
-                    .headers(headers -> setOutgoingHeaders(headers, authorizationHeader))
+                    .headers(headers -> setOutgoingHeaders(headers, ServiceTokenCodec.SCOPE_LEDGER_WRITE, onBehalfOf))
                     .body(payload)
                     .retrieve()
                     .toBodilessEntity();
@@ -112,13 +118,13 @@ public class FinancialServiceClient {
      * @throws IllegalStateException si l'appel échoue (réseau, timeout, erreur serveur)
      */
     public void recordDisbursement(Long tontineId, Long roundId, Long beneficiaryId, BigDecimal amount,
-                                    String authorizationHeader) {
+                                    UUID onBehalfOf) {
         RecordDisbursementPayload payload =
                 new RecordDisbursementPayload(tontineId, roundId, beneficiaryId, amount, CURRENCY_MRU);
         try {
             restClient.post()
                     .uri("/internal/disbursements")
-                    .headers(headers -> setOutgoingHeaders(headers, authorizationHeader))
+                    .headers(headers -> setOutgoingHeaders(headers, ServiceTokenCodec.SCOPE_LEDGER_WRITE, onBehalfOf))
                     .body(payload)
                     .retrieve()
                     .toBodilessEntity();
@@ -137,8 +143,8 @@ public class FinancialServiceClient {
      *
      * @throws IllegalStateException si l'appel échoue (réseau, timeout, erreur serveur)
      */
-    public AccountBalanceResponse getBalance(Long tontineId, String authorizationHeader) {
-        return fetchBalance(tontineId, ACCOUNT_TYPE_TONTINE, authorizationHeader);
+    public AccountBalanceResponse getBalance(Long tontineId, UUID onBehalfOf) {
+        return fetchBalance(tontineId, ACCOUNT_TYPE_TONTINE, onBehalfOf);
     }
 
     /**
@@ -152,16 +158,16 @@ public class FinancialServiceClient {
      *
      * @throws IllegalStateException si l'appel échoue (réseau, timeout, erreur serveur)
      */
-    public AccountBalanceResponse getMemberBalance(Long memberId, String authorizationHeader) {
-        return fetchBalance(memberId, ACCOUNT_TYPE_MEMBER, authorizationHeader);
+    public AccountBalanceResponse getMemberBalance(Long memberId, UUID onBehalfOf) {
+        return fetchBalance(memberId, ACCOUNT_TYPE_MEMBER, onBehalfOf);
     }
 
-    private AccountBalanceResponse fetchBalance(Long ownerReference, String accountType, String authorizationHeader) {
+    private AccountBalanceResponse fetchBalance(Long ownerReference, String accountType, UUID onBehalfOf) {
         String uri = "/internal/accounts/" + ownerReference + "/" + accountType + "/balance";
         try {
             return restClient.get()
                     .uri("/internal/accounts/{ownerReference}/{accountType}/balance", ownerReference, accountType)
-                    .headers(headers -> setOutgoingHeaders(headers, authorizationHeader))
+                    .headers(headers -> setOutgoingHeaders(headers, ServiceTokenCodec.SCOPE_LEDGER_READ, onBehalfOf))
                     .retrieve()
                     .body(AccountBalanceResponse.class);
         } catch (RestClientException e) {
@@ -177,8 +183,8 @@ public class FinancialServiceClient {
      *
      * @throws IllegalStateException si l'appel échoue (réseau, timeout, erreur serveur)
      */
-    public List<LedgerLineResponse> getStatement(Long tontineId, String authorizationHeader) {
-        return fetchStatement(tontineId, ACCOUNT_TYPE_TONTINE, authorizationHeader);
+    public List<LedgerLineResponse> getStatement(Long tontineId, UUID onBehalfOf) {
+        return fetchStatement(tontineId, ACCOUNT_TYPE_TONTINE, onBehalfOf);
     }
 
     /**
@@ -188,16 +194,16 @@ public class FinancialServiceClient {
      *
      * @throws IllegalStateException si l'appel échoue (réseau, timeout, erreur serveur)
      */
-    public List<LedgerLineResponse> getMemberStatement(Long memberId, String authorizationHeader) {
-        return fetchStatement(memberId, ACCOUNT_TYPE_MEMBER, authorizationHeader);
+    public List<LedgerLineResponse> getMemberStatement(Long memberId, UUID onBehalfOf) {
+        return fetchStatement(memberId, ACCOUNT_TYPE_MEMBER, onBehalfOf);
     }
 
-    private List<LedgerLineResponse> fetchStatement(Long ownerReference, String accountType, String authorizationHeader) {
+    private List<LedgerLineResponse> fetchStatement(Long ownerReference, String accountType, UUID onBehalfOf) {
         String uri = "/internal/accounts/" + ownerReference + "/" + accountType + "/lines";
         try {
             return restClient.get()
                     .uri("/internal/accounts/{ownerReference}/{accountType}/lines", ownerReference, accountType)
-                    .headers(headers -> setOutgoingHeaders(headers, authorizationHeader))
+                    .headers(headers -> setOutgoingHeaders(headers, ServiceTokenCodec.SCOPE_LEDGER_READ, onBehalfOf))
                     .retrieve()
                     .body(new ParameterizedTypeReference<List<LedgerLineResponse>>() { });
         } catch (RestClientException e) {
@@ -207,12 +213,14 @@ public class FinancialServiceClient {
     }
 
     /**
-     * Positionne l'en-tête {@code Authorization} (toujours) et, si présent
-     * sur la requête HTTP entrante, l'en-tête {@code X-Correlation-ID}
-     * (décision R14-B3-B) — jamais généré ici (§3, périmètre strict).
+     * Positionne l'en-tête {@code Authorization} avec un jeton de service neuf (décision F-8) et, si
+     * présent sur la requête HTTP entrante, l'en-tête {@code X-Correlation-ID} (décision R14-B3-B) —
+     * jamais généré ici (§3, périmètre strict).
      */
-    private static void setOutgoingHeaders(HttpHeaders headers, String authorizationHeader) {
-        headers.set(HttpHeaders.AUTHORIZATION, authorizationHeader);
+    private void setOutgoingHeaders(HttpHeaders headers, String scope, UUID onBehalfOf) {
+        String token = serviceTokenCodec.issue(
+                ServiceTokenCodec.SERVICE_TONTINE, ServiceTokenCodec.SERVICE_FINANCIAL, List.of(scope), onBehalfOf);
+        headers.setBearerAuth(token);
         String correlationId = currentCorrelationId();
         if (correlationId != null) {
             headers.set(CORRELATION_ID_HEADER, correlationId);

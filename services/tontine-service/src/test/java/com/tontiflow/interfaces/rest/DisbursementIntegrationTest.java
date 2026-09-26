@@ -37,7 +37,6 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -73,7 +72,7 @@ class DisbursementIntegrationTest {
                 "/api/v1/tontines/1/rounds/1/disbursements", null, String.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
-        verify(financialServiceClient, never()).recordDisbursement(any(), any(), any(), any(), anyString());
+        verify(financialServiceClient, never()).recordDisbursement(any(), any(), any(), any(), any(java.util.UUID.class));
     }
 
     @Test
@@ -88,7 +87,7 @@ class DisbursementIntegrationTest {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         verify(financialServiceClient).recordDisbursement(
-                eq(tontineId), eq(roundId), eq(beneficiaryId), eq(new BigDecimal("5000.00")), anyString());
+                eq(tontineId), eq(roundId), eq(beneficiaryId), eq(new BigDecimal("5000.00")), any(java.util.UUID.class));
     }
 
     // Décision R18 D5 : un bénéficiaire PENDING (non lié à un compte) ne peut
@@ -104,7 +103,7 @@ class DisbursementIntegrationTest {
                 "/api/v1/tontines/" + tontineId + "/rounds/" + roundId + "/disbursements", creator);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
-        verify(financialServiceClient, never()).recordDisbursement(any(), any(), any(), any(), anyString());
+        verify(financialServiceClient, never()).recordDisbursement(any(), any(), any(), any(), any(java.util.UUID.class));
     }
 
     @Test
@@ -117,7 +116,7 @@ class DisbursementIntegrationTest {
                 "/api/v1/tontines/" + tontineId + "/rounds/" + roundId + "/disbursements", UUID.randomUUID());
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
-        verify(financialServiceClient, never()).recordDisbursement(any(), any(), any(), any(), anyString());
+        verify(financialServiceClient, never()).recordDisbursement(any(), any(), any(), any(), any(java.util.UUID.class));
     }
 
     @Test
@@ -133,7 +132,7 @@ class DisbursementIntegrationTest {
                 "/api/v1/tontines/" + tontineA + "/rounds/" + roundOfB + "/disbursements", creatorA);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
-        verify(financialServiceClient, never()).recordDisbursement(any(), any(), any(), any(), anyString());
+        verify(financialServiceClient, never()).recordDisbursement(any(), any(), any(), any(), any(java.util.UUID.class));
     }
 
     // TEST contrainte de donnee (decision R6) : round sans beneficiaire assigne.
@@ -147,7 +146,7 @@ class DisbursementIntegrationTest {
                 "/api/v1/tontines/" + tontineId + "/rounds/" + roundId + "/disbursements", creator);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
-        verify(financialServiceClient, never()).recordDisbursement(any(), any(), any(), any(), anyString());
+        verify(financialServiceClient, never()).recordDisbursement(any(), any(), any(), any(), any(java.util.UUID.class));
     }
 
     private Long createTontineAndGetId(UUID creator) {

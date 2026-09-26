@@ -1,6 +1,7 @@
 package com.tontiflow.infrastructure.security;
 
 import com.tontiflow.security.jwt.JwtClaimNames;
+import com.tontiflow.security.jwt.ServiceTokenCodec;
 import io.jsonwebtoken.Jwts;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -11,45 +12,42 @@ import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.ActiveProfiles;
 
 import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.Date;
 import java.util.List;
-import java.util.Set;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Test d'intégration de la chaîne de sécurité JWT de {@code financial-service}
- * ({@link SecurityConfig}).
- *
- * <p>Exercée via {@link #PROTECTED_PATH} (endpoint interne réel, authentifié,
- * sans effet de bord). Historiquement exercée via {@code /actuator/health}
- * (seul endpoint HTTP existant avant les décisions R3+) ; retargetée en
- * décision R11 (corrections techniques) car {@code /actuator/health} est
- * désormais volontairement public (sonde d'orchestration sans JWT) — voir
- * {@link #health_withoutToken_isPubliclyAccessible} et {@link
- * #sensitiveActuatorEndpoint_remainsProtectedAndUnexposed} ci-dessous pour
- * les preuves spécifiques à ce changement.</p>
+ * Test d'intégration de la chaîne de sécurité de {@code financial-service} (décision F-8) : les
+ * endpoints {@code /internal/**} n'acceptent que le jeton de service émis par {@code tontine-service}
+ * (HS256, portée par méthode), jamais un JWT utilisateur.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("test")
-@Import(JwtTestSecurityConfiguration.class)
+@Import(ServiceTokenTestConfiguration.class)
 class SecurityConfigIntegrationTest {
 
-    /** Endpoint réel authentifié, sans effet de bord, jamais public. */
-    private static final String PROTECTED_PATH = "/internal/accounts/1/TONTINE/balance";
+    private static final String READ_PATH = "/internal/accounts/1/TONTINE/balance";
+    private static final String WRITE_PATH = "/internal/contributions";
+    private static final String VALID_WRITE_BODY =
+            "{\"tontineId\":9001,\"roundId\":9002,\"memberId\":9003,\"amount\":10.00,\"currency\":\"MRU\"}";
 
     @Autowired
     private TestRestTemplate restTemplate;
 
     @Autowired
-    private KeyPair jwtTestKeyPair;
+    private ServiceTokenCodec serviceTokenCodec;
 
     // --- Décision R11 : /actuator/health public, endpoints sensibles non exposés ---
 
@@ -62,63 +60,46 @@ class SecurityConfigIntegrationTest {
 
     @Test
     void sensitiveActuatorEndpoint_remainsProtectedAndUnexposed() {
-        // Sans JWT : la chaine de securite rejette avant meme de determiner si
-        // /actuator/beans est mappe (anyRequest().authenticated() intercepte
-        // toute URL, y compris les endpoints actuator non exposes).
-        ResponseEntity<String> withoutToken = restTemplate.getForEntity("/actuator/beans", String.class);
-        assertThat(withoutToken.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(restTemplate.getForEntity("/actuator/beans", String.class).getStatusCode())
+                .isEqualTo(HttpStatus.UNAUTHORIZED);
 
-        // Avec un JWT valide : toujours inaccessible - management.endpoints.web.exposure.include
-        // ne liste que "health" (application.yaml), "beans" n'est jamais enregistre.
-        String token = validToken(Set.of("ROLE_USER"), Set.of());
-        HttpHeaders headers = new HttpHeaders();
-        headers.setBearerAuth(token);
-        ResponseEntity<String> withToken = restTemplate.exchange(
-                "/actuator/beans", HttpMethod.GET, new HttpEntity<>(headers), String.class);
-        assertThat(withToken.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        // Meme avec un jeton de service valide : jamais accessible (le filtre de jeton ne s'applique
+        // qu'a /internal/**, donc la requete reste anonyme et anyRequest().denyAll() la refuse).
+        assertThat(get("/actuator/beans", ServiceTokenTestConfiguration.readToken(serviceTokenCodec)).getStatusCode())
+                .isIn(HttpStatus.UNAUTHORIZED, HttpStatus.FORBIDDEN, HttpStatus.NOT_FOUND);
     }
 
-    // --- Matrice JWT / chaîne de sécurité complète (endpoint métier protégé) ---
+    // --- Jeton de service valide ---
 
     @Test
-    void protectedEndpoint_withoutToken_isRejectedWithUnauthorized() {
-        ResponseEntity<String> response = restTemplate.getForEntity(PROTECTED_PATH, String.class);
+    void readEndpoint_withValidReadToken_isAccepted() {
+        ResponseEntity<String> response = get(READ_PATH, ServiceTokenTestConfiguration.readToken(serviceTokenCodec));
 
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(response.getStatusCode()).isNotIn(HttpStatus.UNAUTHORIZED, HttpStatus.FORBIDDEN);
     }
 
     @Test
-    void protectedEndpoint_withValidToken_isAuthenticated() {
-        String token = validToken(Set.of("ROLE_USER"), Set.of());
+    void writeEndpoint_withValidWriteToken_isAccepted() {
+        ResponseEntity<String> response = post(WRITE_PATH, VALID_WRITE_BODY,
+                ServiceTokenTestConfiguration.writeToken(serviceTokenCodec));
 
-        ResponseEntity<String> response = exchangeWithBearer(token);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
 
-        assertThat(response.getStatusCode()).isNotEqualTo(HttpStatus.UNAUTHORIZED);
+    // --- Absence de jeton et jetons non valides ---
+
+    @Test
+    void internalEndpoints_withoutToken_areRejectedWithUnauthorized() {
+        assertThat(restTemplate.getForEntity(READ_PATH, String.class).getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(post(WRITE_PATH, VALID_WRITE_BODY, null).getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
     }
 
     @Test
-    void protectedEndpoint_withMalformedToken_isRejectedWithUnauthorized() {
-        ResponseEntity<String> response = exchangeWithBearer("ceci-n-est-pas-un-jwt-valide");
-
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
-    }
-
-    @Test
-    void protectedEndpoint_withExpiredToken_isRejectedWithUnauthorized() {
-        String token = tokenExpiringAt(Instant.now().minus(1, ChronoUnit.MINUTES));
-
-        ResponseEntity<String> response = exchangeWithBearer(token);
-
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
-    }
-
-    @Test
-    void protectedEndpoint_withWrongSigningKey_isRejectedWithUnauthorized() throws Exception {
-        java.security.KeyPairGenerator generator = java.security.KeyPairGenerator.getInstance("RSA");
+    void internalEndpoints_withUserStyleRs256Jwt_areRejectedWithUnauthorized() throws Exception {
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
         generator.initialize(2048);
-        java.security.PrivateKey otherPrivateKey = generator.generateKeyPair().getPrivate();
-
-        String token = Jwts.builder()
+        KeyPair pair = generator.generateKeyPair();
+        String userJwt = Jwts.builder()
                 .claim(JwtClaimNames.SUBJECT, UUID.randomUUID().toString())
                 .claim(JwtClaimNames.ISSUED_AT, Date.from(Instant.now()))
                 .claim(JwtClaimNames.EXPIRATION, Date.from(Instant.now().plus(15, ChronoUnit.MINUTES)))
@@ -126,159 +107,117 @@ class SecurityConfigIntegrationTest {
                 .claim(JwtClaimNames.ISSUER, "authentication-service")
                 .claim(JwtClaimNames.USERNAME, "alice")
                 .claim(JwtClaimNames.EMAIL, "alice@tontiflow.test")
-                .claim(JwtClaimNames.ROLES, List.of("ROLE_USER"))
-                .claim(JwtClaimNames.PERMISSIONS, List.of())
-                .signWith(otherPrivateKey, Jwts.SIG.RS256)
+                .claim(JwtClaimNames.ROLES, List.of("ROLE_USER", "ROLE_ADMIN"))
+                .claim(JwtClaimNames.PERMISSIONS, List.of("SCOPE_ledger.write", "SCOPE_ledger.read"))
+                .signWith(pair.getPrivate(), Jwts.SIG.RS256)
                 .compact();
 
-        ResponseEntity<String> response = exchangeWithBearer(token);
-
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
-    }
-
-    // --- Durcissement R21-B.1 : claim "sub" absent ou non-UUID -> 401 (pas 500) ---
-
-    @Test
-    void protectedEndpoint_withSignedTokenButSubjectAbsent_isRejectedWithUnauthorized() {
-        String token = signedTokenWithSubject(null);
-
-        ResponseEntity<String> response = exchangeWithBearer(token);
-
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(get(READ_PATH, userJwt).getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(post(WRITE_PATH, VALID_WRITE_BODY, userJwt).getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
     }
 
     @Test
-    void protectedEndpoint_withSignedTokenButSubjectNotUuid_isRejectedWithUnauthorized() {
-        String token = signedTokenWithSubject("pas-un-uuid");
+    void internalEndpoints_withTokenSignedByAnotherSecret_areRejectedWithUnauthorized() {
+        ServiceTokenCodec other = new ServiceTokenCodec("another-secret-another-secret-0123456789", Clock.systemUTC());
+        String token = ServiceTokenTestConfiguration.writeToken(other);
 
-        ResponseEntity<String> response = exchangeWithBearer(token);
-
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(get(READ_PATH, token).getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(post(WRITE_PATH, VALID_WRITE_BODY, token).getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
     }
 
     @Test
-    void protectedEndpoint_withBasicSchemeInsteadOfBearer_isRejectedWithUnauthorized() {
-        HttpHeaders headers = new HttpHeaders();
-        headers.set("Authorization", "Basic dXNlcjpwYXNz");
-        ResponseEntity<String> response = restTemplate.exchange(
-                PROTECTED_PATH, HttpMethod.GET, new HttpEntity<>(headers), String.class);
+    void internalEndpoints_withExpiredToken_areRejectedWithUnauthorized() {
+        // Emis dans le passe (2 minutes, au-dela de TTL + tolerance d'horloge).
+        Clock past = Clock.fixed(Instant.now().minus(2, ChronoUnit.MINUTES), ZoneOffset.UTC);
+        ServiceTokenCodec pastCodec = new ServiceTokenCodec(ServiceTokenTestConfiguration.SECRET, past);
+        String token = ServiceTokenTestConfiguration.readToken(pastCodec);
 
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(get(READ_PATH, token).getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
     }
 
     @Test
-    void protectedEndpoint_withEmptyBearer_isRejectedWithUnauthorized() {
-        HttpHeaders headers = new HttpHeaders();
-        headers.set("Authorization", "Bearer ");
-        ResponseEntity<String> response = restTemplate.exchange(
-                PROTECTED_PATH, HttpMethod.GET, new HttpEntity<>(headers), String.class);
+    void internalEndpoints_withWrongAudienceOrIssuer_areRejectedWithUnauthorized() {
+        String wrongAudience = serviceTokenCodec.issue(ServiceTokenCodec.SERVICE_TONTINE, "credit-service",
+                List.of(ServiceTokenCodec.SCOPE_LEDGER_READ), null);
+        String wrongIssuer = serviceTokenCodec.issue("user-service", ServiceTokenCodec.SERVICE_FINANCIAL,
+                List.of(ServiceTokenCodec.SCOPE_LEDGER_READ), null);
 
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
-    }
-
-    // --- Tests d'usurpation ---
-
-    @Test
-    void protectedEndpoint_withValidTokenAndForgedUserIdHeader_stillAuthenticatesFromJwtOnly() {
-        assertNotUnauthorizedWithForgedHeader("X-User-Id", "utilisateur-admin");
+        assertThat(get(READ_PATH, wrongAudience).getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(get(READ_PATH, wrongIssuer).getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
     }
 
     @Test
-    void protectedEndpoint_withValidTokenAndForgedUsernameHeader_stillAuthenticatesFromJwtOnly() {
-        assertNotUnauthorizedWithForgedHeader("X-Username", "admin");
+    void internalEndpoints_withMalformedToken_areRejectedWithUnauthorized() {
+        assertThat(get(READ_PATH, "ceci-n-est-pas-un-jeton").getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
     }
 
     @Test
-    void protectedEndpoint_withValidTokenAndForgedEmailHeader_stillAuthenticatesFromJwtOnly() {
-        assertNotUnauthorizedWithForgedHeader("X-Email", "admin@example.com");
+    void internalEndpoints_withBasicSchemeOrEmptyBearer_areRejectedWithUnauthorized() {
+        HttpHeaders basic = new HttpHeaders();
+        basic.set("Authorization", "Basic dXNlcjpwYXNz");
+        HttpHeaders empty = new HttpHeaders();
+        empty.set("Authorization", "Bearer ");
+
+        assertThat(restTemplate.exchange(READ_PATH, HttpMethod.GET, new HttpEntity<>(basic), String.class)
+                .getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(restTemplate.exchange(READ_PATH, HttpMethod.GET, new HttpEntity<>(empty), String.class)
+                .getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    }
+
+    // --- Portée exigée par méthode (moindre privilège) ---
+
+    @Test
+    void writeEndpoint_withReadOnlyToken_isForbidden() {
+        String readToken = ServiceTokenTestConfiguration.readToken(serviceTokenCodec);
+
+        assertThat(post(WRITE_PATH, VALID_WRITE_BODY, readToken).getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
     }
 
     @Test
-    void protectedEndpoint_withValidTokenAndForgedRolesHeader_stillAuthenticatesFromJwtOnly() {
-        assertNotUnauthorizedWithForgedHeader("X-Roles", "ROLE_ADMIN");
+    void readEndpoint_withWriteOnlyToken_isForbidden() {
+        String writeToken = ServiceTokenTestConfiguration.writeToken(serviceTokenCodec);
+
+        assertThat(get(READ_PATH, writeToken).getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
     }
 
     @Test
-    void protectedEndpoint_withValidTokenAndForgedPermissionsHeader_stillAuthenticatesFromJwtOnly() {
-        assertNotUnauthorizedWithForgedHeader("X-Permissions", "*");
+    void unknownInternalPath_withValidToken_isDenied() {
+        String token = ServiceTokenTestConfiguration.readToken(serviceTokenCodec);
+
+        assertThat(get("/internal/unknown", token).getStatusCode()).isIn(HttpStatus.FORBIDDEN, HttpStatus.NOT_FOUND);
+        assertThat(post("/internal/accounts/1/TONTINE/balance", "{}", token).getStatusCode())
+                .isIn(HttpStatus.FORBIDDEN, HttpStatus.METHOD_NOT_ALLOWED);
     }
 
+    // --- Usurpation : en-têtes de confiance forgés sans effet ---
+
     @Test
-    void protectedEndpoint_withForgedTrustHeadersButNoJwt_isRejectedWithUnauthorized() {
+    void forgedTrustHeaders_withoutToken_areRejectedWithUnauthorized() {
         HttpHeaders headers = new HttpHeaders();
         headers.set("X-User-Id", "utilisateur-admin");
-        headers.set("X-Username", "admin");
-        headers.set("X-Email", "admin@example.com");
         headers.set("X-Roles", "ROLE_ADMIN");
         headers.set("X-Permissions", "*");
 
         ResponseEntity<String> response = restTemplate.exchange(
-                PROTECTED_PATH, HttpMethod.GET, new HttpEntity<>(headers), String.class);
+                READ_PATH, HttpMethod.GET, new HttpEntity<>(headers), String.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
     }
 
-    private void assertNotUnauthorizedWithForgedHeader(String headerName, String headerValue) {
-        String token = validToken(Set.of("ROLE_USER"), Set.of());
-
+    private ResponseEntity<String> get(String path, String bearer) {
         HttpHeaders headers = new HttpHeaders();
-        headers.setBearerAuth(token);
-        headers.set(headerName, headerValue);
-
-        ResponseEntity<String> response = restTemplate.exchange(
-                PROTECTED_PATH, HttpMethod.GET, new HttpEntity<>(headers), String.class);
-
-        // Comportement identique au cas sans header forge : preuve que ce header
-        // n'a strictement aucun effet, seule l'identite du JWT compte.
-        assertThat(response.getStatusCode()).isNotEqualTo(HttpStatus.UNAUTHORIZED);
-    }
-
-    private ResponseEntity<String> exchangeWithBearer(String token) {
-        HttpHeaders headers = new HttpHeaders();
-        headers.setBearerAuth(token);
-        return restTemplate.exchange(PROTECTED_PATH, HttpMethod.GET, new HttpEntity<>(headers), String.class);
-    }
-
-    private String validToken(Set<String> roles, Set<String> permissions) {
-        return tokenExpiringAt(Instant.now().plus(15, ChronoUnit.MINUTES), roles, permissions);
-    }
-
-    private String tokenExpiringAt(Instant expiresAt) {
-        return tokenExpiringAt(expiresAt, Set.of("ROLE_USER"), Set.of());
-    }
-
-    private String tokenExpiringAt(Instant expiresAt, Set<String> roles, Set<String> permissions) {
-        return Jwts.builder()
-                .claim(JwtClaimNames.SUBJECT, UUID.randomUUID().toString())
-                .claim(JwtClaimNames.ISSUED_AT, Date.from(Instant.now()))
-                .claim(JwtClaimNames.EXPIRATION, Date.from(expiresAt))
-                .claim(JwtClaimNames.JWT_ID, UUID.randomUUID().toString())
-                .claim(JwtClaimNames.ISSUER, "authentication-service")
-                .claim(JwtClaimNames.USERNAME, "alice")
-                .claim(JwtClaimNames.EMAIL, "alice@tontiflow.test")
-                .claim(JwtClaimNames.ROLES, List.copyOf(roles))
-                .claim(JwtClaimNames.PERMISSIONS, List.copyOf(permissions))
-                .signWith(jwtTestKeyPair.getPrivate(), Jwts.SIG.RS256)
-                .compact();
-    }
-
-    /**
-     * Token RS256 correctement signé mais dont le claim {@code sub} est soit
-     * absent ({@code subject == null}), soit une valeur arbitraire non-UUID.
-     */
-    private String signedTokenWithSubject(String subject) {
-        var builder = Jwts.builder()
-                .claim(JwtClaimNames.ISSUED_AT, Date.from(Instant.now()))
-                .claim(JwtClaimNames.EXPIRATION, Date.from(Instant.now().plus(15, ChronoUnit.MINUTES)))
-                .claim(JwtClaimNames.JWT_ID, UUID.randomUUID().toString())
-                .claim(JwtClaimNames.ISSUER, "authentication-service")
-                .claim(JwtClaimNames.USERNAME, "alice")
-                .claim(JwtClaimNames.EMAIL, "alice@tontiflow.test")
-                .claim(JwtClaimNames.ROLES, List.of("ROLE_USER"))
-                .claim(JwtClaimNames.PERMISSIONS, List.of());
-        if (subject != null) {
-            builder.claim(JwtClaimNames.SUBJECT, subject);
+        if (bearer != null) {
+            headers.setBearerAuth(bearer);
         }
-        return builder.signWith(jwtTestKeyPair.getPrivate(), Jwts.SIG.RS256).compact();
+        return restTemplate.exchange(path, HttpMethod.GET, new HttpEntity<>(headers), String.class);
+    }
+
+    private ResponseEntity<String> post(String path, String body, String bearer) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        if (bearer != null) {
+            headers.setBearerAuth(bearer);
+        }
+        return restTemplate.exchange(path, HttpMethod.POST, new HttpEntity<>(body, headers), String.class);
     }
 }
