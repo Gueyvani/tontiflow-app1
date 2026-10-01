@@ -7,6 +7,7 @@ import com.tontiflow.application.exception.AccountNotFoundException;
 import com.tontiflow.application.exception.AccountNotFoundInAdminException;
 import com.tontiflow.application.exception.InvalidAccountStatusTransitionException;
 import com.tontiflow.application.exception.InvalidCredentialsException;
+import com.tontiflow.application.exception.AdminGuardrailViolationException;
 import com.tontiflow.application.exception.RoleAlreadyAssignedException;
 import com.tontiflow.application.exception.RoleNotAssignedException;
 import com.tontiflow.application.exception.RoleNotFoundException;
@@ -19,6 +20,7 @@ import com.tontiflow.infrastructure.repository.AccountStatusChangeRepository;
 import com.tontiflow.infrastructure.repository.AuthAccountRepository;
 import com.tontiflow.infrastructure.repository.RoleRepository;
 import jakarta.persistence.EntityManager;
+import jakarta.persistence.LockModeType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -45,6 +47,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
@@ -534,7 +537,7 @@ class AuthAccountServiceTest {
 
         when(authAccountRepository.findById(account.getId())).thenReturn(java.util.Optional.of(account));
 
-        authAccountService.removeRole(account.getId(), role.getId());
+        authAccountService.removeRole(account.getId(), role.getId(), UUID.randomUUID());
 
         assertThat(account.getRoles()).isEmpty();
     }
@@ -546,7 +549,7 @@ class AuthAccountServiceTest {
 
         when(authAccountRepository.findById(account.getId())).thenReturn(java.util.Optional.of(account));
 
-        assertThatThrownBy(() -> authAccountService.removeRole(account.getId(), UUID.randomUUID()))
+        assertThatThrownBy(() -> authAccountService.removeRole(account.getId(), UUID.randomUUID(), UUID.randomUUID()))
                 .isInstanceOf(RoleNotAssignedException.class);
     }
 
@@ -555,7 +558,7 @@ class AuthAccountServiceTest {
         UUID accountId = UUID.randomUUID();
         when(authAccountRepository.findById(accountId)).thenReturn(java.util.Optional.empty());
 
-        assertThatThrownBy(() -> authAccountService.removeRole(accountId, UUID.randomUUID()))
+        assertThatThrownBy(() -> authAccountService.removeRole(accountId, UUID.randomUUID(), UUID.randomUUID()))
                 .isInstanceOf(AccountNotFoundInAdminException.class);
     }
 
@@ -676,6 +679,269 @@ class AuthAccountServiceTest {
 
         verify(refreshTokenService, never()).revokeAllForAccount(any());
         verify(accountStatusChangeRepository, never()).save(any());
+    }
+
+    // ------------------------------------------------------------------
+    // Decision F-4 : garde-fous d'integrite des administrateurs (auto-desactivation, auto-retrait de
+    // ROLE_ADMIN, dernier administrateur actif). Logique dans le service ; verrou ROLE_ADMIN puis
+    // relecture de la cible avant toute evaluation. La preuve sous acces concurrent reel est apportee
+    // par AdminGuardrailIntegrationTest (H2) et AdminGuardrailPostgresIntegrationTest (PostgreSQL).
+    // ------------------------------------------------------------------
+
+    private Role stubAdminRole() {
+        Role adminRole = roleWithId("ROLE_ADMIN");
+        when(roleRepository.findByName("ROLE_ADMIN")).thenReturn(java.util.Optional.of(adminRole));
+        return adminRole;
+    }
+
+    private AuthAccount adminAccount(AccountStatus status, Role adminRole) {
+        AuthAccount account = accountWithId();
+        account.setStatus(status);
+        account.setRoles(new java.util.HashSet<>(Set.of(adminRole)));
+        when(authAccountRepository.findById(account.getId())).thenReturn(java.util.Optional.of(account));
+        return account;
+    }
+
+    @Test
+    void removeRole_ofANonAdminRole_takesNoLock_andCountsNoAdmin() {
+        Role adminRole = stubAdminRole();
+        Role member = roleWithId("ROLE_MEMBER");
+        AuthAccount account = accountWithId();
+        account.setRoles(new java.util.HashSet<>(Set.of(member, adminRole)));
+        when(authAccountRepository.findById(account.getId())).thenReturn(java.util.Optional.of(account));
+
+        authAccountService.removeRole(account.getId(), member.getId(), UUID.randomUUID());
+
+        assertThat(account.getRoles()).containsExactly(adminRole);
+        verify(entityManager, never()).lock(any(), any());
+        verify(authAccountRepository, never()).countByRoleNameAndStatusExcludingAccount(any(), any(), any());
+    }
+
+    @Test
+    void removeRole_adminRoleFromYourself_isRefused_beforeAnyCounting_soAnotherAdminChangesNothing() {
+        Role adminRole = stubAdminRole();
+        AuthAccount self = adminAccount(AccountStatus.ACTIVE, adminRole);
+
+        assertThatThrownBy(() -> authAccountService.removeRole(self.getId(), adminRole.getId(), self.getId()))
+                .isInstanceOf(AdminGuardrailViolationException.class)
+                .hasMessage("Operation not allowed");
+
+        assertThat(self.getRoles()).containsExactly(adminRole); // rien n'a ete retire
+        // Regle B independante de la regle C : refus meme s'il existait d'autres administrateurs.
+        verify(authAccountRepository, never()).countByRoleNameAndStatusExcludingAccount(any(), any(), any());
+    }
+
+    @Test
+    void removeRole_adminRoleOfTheLastActiveAdmin_isRefused() {
+        Role adminRole = stubAdminRole();
+        AuthAccount target = adminAccount(AccountStatus.ACTIVE, adminRole);
+        when(authAccountRepository.countByRoleNameAndStatusExcludingAccount("ROLE_ADMIN", AccountStatus.ACTIVE, target.getId()))
+                .thenReturn(0L);
+
+        assertThatThrownBy(() -> authAccountService.removeRole(target.getId(), adminRole.getId(), UUID.randomUUID()))
+                .isInstanceOf(AdminGuardrailViolationException.class);
+
+        assertThat(target.getRoles()).containsExactly(adminRole);
+    }
+
+    @Test
+    void removeRole_adminRoleWhileAnotherActiveAdminExists_isAllowed() {
+        Role adminRole = stubAdminRole();
+        AuthAccount target = adminAccount(AccountStatus.ACTIVE, adminRole);
+        when(authAccountRepository.countByRoleNameAndStatusExcludingAccount("ROLE_ADMIN", AccountStatus.ACTIVE, target.getId()))
+                .thenReturn(1L);
+
+        authAccountService.removeRole(target.getId(), adminRole.getId(), UUID.randomUUID());
+
+        assertThat(target.getRoles()).isEmpty();
+    }
+
+    @Test
+    void removeRole_adminRoleOfAnAlreadyDisabledAdmin_isNotCountedAndNeverBlocked() {
+        Role adminRole = stubAdminRole();
+        AuthAccount disabledAdmin = adminAccount(AccountStatus.DISABLED, adminRole);
+
+        authAccountService.removeRole(disabledAdmin.getId(), adminRole.getId(), UUID.randomUUID());
+
+        assertThat(disabledAdmin.getRoles()).isEmpty();
+        verify(authAccountRepository, never()).countByRoleNameAndStatusExcludingAccount(any(), any(), any());
+    }
+
+    @Test
+    void removeRole_adminRoleNoLongerAssigned_keepsTheExistingNotAssignedBehavior_evenForYourself() {
+        Role adminRole = stubAdminRole();
+        AuthAccount account = accountWithId();
+        account.setRoles(new java.util.HashSet<>());
+        when(authAccountRepository.findById(account.getId())).thenReturn(java.util.Optional.of(account));
+
+        assertThatThrownBy(() -> authAccountService.removeRole(account.getId(), adminRole.getId(), account.getId()))
+                .isInstanceOf(RoleNotAssignedException.class);
+    }
+
+    @Test
+    void removeRole_adminRole_locksTheAdminRoleThenRefreshesTheTarget_beforeCounting() {
+        Role adminRole = stubAdminRole();
+        AuthAccount target = adminAccount(AccountStatus.ACTIVE, adminRole);
+        when(authAccountRepository.countByRoleNameAndStatusExcludingAccount(any(), any(), any())).thenReturn(1L);
+
+        authAccountService.removeRole(target.getId(), adminRole.getId(), UUID.randomUUID());
+
+        org.mockito.InOrder order = org.mockito.Mockito.inOrder(entityManager, authAccountRepository);
+        order.verify(entityManager).lock(adminRole, LockModeType.PESSIMISTIC_WRITE);
+        order.verify(entityManager).refresh(target);
+        order.verify(authAccountRepository).countByRoleNameAndStatusExcludingAccount(
+                "ROLE_ADMIN", AccountStatus.ACTIVE, target.getId());
+    }
+
+    @Test
+    void changeAccountStatus_leavingActiveOnYourself_isRefused_withoutLockNorWrite() {
+        AuthAccount self = accountWithId();
+        when(authAccountRepository.findById(self.getId())).thenReturn(java.util.Optional.of(self));
+
+        for (AccountStatus target : List.of(AccountStatus.DISABLED, AccountStatus.LOCKED)) {
+            assertThatThrownBy(() -> authAccountService.changeAccountStatus(self.getId(), target, "Motif", self.getId()))
+                    .isInstanceOf(AdminGuardrailViolationException.class)
+                    .hasMessage("Operation not allowed");
+        }
+
+        verify(entityManager, never()).lock(any(), any());
+        verify(authAccountRepository, never()).transitionStatusIfAllowed(any(), any(), any());
+        verify(refreshTokenService, never()).revokeAllForAccount(any());
+        verify(accountStatusChangeRepository, never()).save(any());
+    }
+
+    @Test
+    void changeAccountStatus_ofTheLastActiveAdmin_isRefused_withoutAnyWrite() {
+        Role adminRole = stubAdminRole();
+        AuthAccount target = adminAccount(AccountStatus.ACTIVE, adminRole);
+        when(authAccountRepository.countByRoleNameAndStatusExcludingAccount("ROLE_ADMIN", AccountStatus.ACTIVE, target.getId()))
+                .thenReturn(0L);
+
+        for (AccountStatus status : List.of(AccountStatus.DISABLED, AccountStatus.LOCKED)) {
+            assertThatThrownBy(() -> authAccountService.changeAccountStatus(target.getId(), status, "Motif", UUID.randomUUID()))
+                    .isInstanceOf(AdminGuardrailViolationException.class);
+        }
+
+        verify(authAccountRepository, never()).transitionStatusIfAllowed(any(), any(), any());
+        verify(refreshTokenService, never()).revokeAllForAccount(any());
+        verify(accountStatusChangeRepository, never()).save(any());
+    }
+
+    @Test
+    void changeAccountStatus_ofAnAdminWhileAnotherActiveAdminExists_isAllowed() {
+        Role adminRole = stubAdminRole();
+        AuthAccount target = adminAccount(AccountStatus.ACTIVE, adminRole);
+        when(authAccountRepository.countByRoleNameAndStatusExcludingAccount("ROLE_ADMIN", AccountStatus.ACTIVE, target.getId()))
+                .thenReturn(1L);
+        when(authAccountRepository.transitionStatusIfAllowed(eq(target.getId()), eq("DISABLED"), any())).thenReturn(1);
+
+        authAccountService.changeAccountStatus(target.getId(), AccountStatus.DISABLED, "Motif", UUID.randomUUID());
+
+        // Les sources autorisees viennent d'un Set.of(...) : ordre non deterministe entre JVM, comparaison sans ordre.
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<String>> sources = ArgumentCaptor.forClass(List.class);
+        verify(authAccountRepository).transitionStatusIfAllowed(eq(target.getId()), eq("DISABLED"), sources.capture());
+        assertThat(sources.getValue()).containsExactlyInAnyOrder("ACTIVE", "LOCKED");
+        verify(refreshTokenService).revokeAllForAccount(target.getId());
+    }
+
+    // ------------------------------------------------------------------
+    // Decision F-4 (correction de course) : la garde ne doit jamais dependre du currentStatus lu AVANT
+    // le verrou ROLE_ADMIN - seul targetStatus != ACTIVE la declenche. La regle C est evaluee sur l'etat
+    // RELU apres le verrou (entityManager.refresh), jamais sur le statut initialement lu. Sans ce
+    // correctif, une transition LOCKED -> DISABLED ne declenchait AUCUNE garde (l'ancienne condition
+    // exigeait currentStatus == ACTIVE), ce qui aurait pu laisser tomber le nombre d'administrateurs
+    // actifs a zero si le compte avait ete reactive entre la premiere lecture et le verrou.
+    // ------------------------------------------------------------------
+
+    @Test
+    void changeAccountStatus_lockedToDisabled_locksRoleAdmin_refreshesTarget_andEvaluatesRuleCOnRefreshedStatus() {
+        Role adminRole = stubAdminRole();
+        // currentStatus lu AVANT le verrou = LOCKED (l'ancienne condition currentStatus == ACTIVE
+        // n'aurait jamais declenche la garde pour cette transition).
+        AuthAccount target = adminAccount(AccountStatus.LOCKED, adminRole);
+        // Simule la course : le refresh() qui suit l'acquisition du verrou decouvre que le compte a ete
+        // reactive entre-temps par une autre transaction deja committee.
+        doAnswer(invocation -> {
+            target.setStatus(AccountStatus.ACTIVE);
+            return null;
+        }).when(entityManager).refresh(target);
+        when(authAccountRepository.countByRoleNameAndStatusExcludingAccount("ROLE_ADMIN", AccountStatus.ACTIVE, target.getId()))
+                .thenReturn(0L); // dernier administrateur actif une fois l'etat reel connu
+
+        assertThatThrownBy(() -> authAccountService.changeAccountStatus(target.getId(), AccountStatus.DISABLED, "Motif", UUID.randomUUID()))
+                .isInstanceOf(AdminGuardrailViolationException.class)
+                .hasMessage("Operation not allowed");
+
+        org.mockito.InOrder order = org.mockito.Mockito.inOrder(entityManager, authAccountRepository);
+        order.verify(entityManager).lock(adminRole, LockModeType.PESSIMISTIC_WRITE);
+        order.verify(entityManager).refresh(target);
+        // Le comptage porte sur ROLE_ADMIN/ACTIVE - c'est bien l'etat RELU (ACTIVE), pas le
+        // currentStatus initial (LOCKED), qui a declenche cette evaluation.
+        order.verify(authAccountRepository).countByRoleNameAndStatusExcludingAccount(
+                "ROLE_ADMIN", AccountStatus.ACTIVE, target.getId());
+        verify(authAccountRepository, never()).transitionStatusIfAllowed(any(), any(), any());
+        verify(refreshTokenService, never()).revokeAllForAccount(any());
+        verify(accountStatusChangeRepository, never()).save(any());
+    }
+
+    @Test
+    void changeAccountStatus_lockedToDisabled_ofAnAdminWhileAnotherActiveAdminExists_isAllowed() {
+        Role adminRole = stubAdminRole();
+        AuthAccount target = adminAccount(AccountStatus.LOCKED, adminRole);
+        doAnswer(invocation -> {
+            target.setStatus(AccountStatus.ACTIVE); // meme course que ci-dessus, mais un autre admin existe
+            return null;
+        }).when(entityManager).refresh(target);
+        when(authAccountRepository.countByRoleNameAndStatusExcludingAccount("ROLE_ADMIN", AccountStatus.ACTIVE, target.getId()))
+                .thenReturn(1L);
+        when(authAccountRepository.transitionStatusIfAllowed(eq(target.getId()), eq("DISABLED"), any())).thenReturn(1);
+
+        authAccountService.changeAccountStatus(target.getId(), AccountStatus.DISABLED, "Motif", UUID.randomUUID());
+
+        verify(entityManager).lock(adminRole, LockModeType.PESSIMISTIC_WRITE);
+        verify(authAccountRepository).transitionStatusIfAllowed(eq(target.getId()), eq("DISABLED"), any());
+        verify(refreshTokenService).revokeAllForAccount(target.getId());
+    }
+
+    @Test
+    void changeAccountStatus_ofANonAdmin_locksTheMutex_butNeverCounts() {
+        Role adminRole = stubAdminRole();
+        AuthAccount plain = accountWithId();
+        when(authAccountRepository.findById(plain.getId())).thenReturn(java.util.Optional.of(plain));
+        when(authAccountRepository.transitionStatusIfAllowed(eq(plain.getId()), eq("LOCKED"), any())).thenReturn(1);
+
+        authAccountService.changeAccountStatus(plain.getId(), AccountStatus.LOCKED, "Motif", UUID.randomUUID());
+
+        verify(entityManager).lock(adminRole, LockModeType.PESSIMISTIC_WRITE);
+        verify(authAccountRepository, never()).countByRoleNameAndStatusExcludingAccount(any(), any(), any());
+    }
+
+    @Test
+    void changeAccountStatus_whenNoAdminRoleExists_hasNothingToProtect() {
+        AuthAccount account = accountWithId();
+        when(authAccountRepository.findById(account.getId())).thenReturn(java.util.Optional.of(account));
+        when(authAccountRepository.transitionStatusIfAllowed(eq(account.getId()), eq("LOCKED"), any())).thenReturn(1);
+
+        authAccountService.changeAccountStatus(account.getId(), AccountStatus.LOCKED, "Motif", UUID.randomUUID());
+
+        verify(entityManager, never()).lock(any(), any());
+    }
+
+    @Test
+    void changeAccountStatus_transitionsThatDoNotLeaveActive_areNotGuarded_evenOnYourself() {
+        AuthAccount self = accountWithId();
+        self.setStatus(AccountStatus.DISABLED);
+        when(authAccountRepository.findById(self.getId())).thenReturn(java.util.Optional.of(self));
+        when(authAccountRepository.transitionStatusIfAllowed(eq(self.getId()), eq("ACTIVE"), any())).thenReturn(1);
+
+        authAccountService.changeAccountStatus(self.getId(), AccountStatus.ACTIVE, "Motif", self.getId());
+
+        verify(entityManager, never()).lock(any(), any());
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<String>> sources = ArgumentCaptor.forClass(List.class);
+        verify(authAccountRepository).transitionStatusIfAllowed(eq(self.getId()), eq("ACTIVE"), sources.capture());
+        assertThat(sources.getValue()).containsExactlyInAnyOrder("LOCKED", "DISABLED");
     }
 
     private static AuthAccount accountWithId() {

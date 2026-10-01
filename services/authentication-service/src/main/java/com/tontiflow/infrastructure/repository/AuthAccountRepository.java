@@ -1,5 +1,6 @@
 package com.tontiflow.infrastructure.repository;
 
+import com.tontiflow.domain.enums.AccountStatus;
 import com.tontiflow.domain.model.AuthAccount;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
@@ -179,4 +180,24 @@ public interface AuthAccountRepository extends JpaRepository<AuthAccount, UUID> 
             """, nativeQuery = true)
     int transitionStatusIfAllowed(@Param("id") UUID id, @Param("targetStatus") String targetStatus,
                                    @Param("allowedSourceStatuses") List<String> allowedSourceStatuses);
+
+    /**
+     * Nombre de comptes de statut {@code status} détenant le rôle {@code roleName}, hors le compte
+     * {@code excludedAccountId} (décision F-4 : administrateurs actifs restants après une opération).
+     * Le statut est celui de la base ; seul le rôle de ce nom est joint (une permission de même nom
+     * n'est jamais comptée). Un compte n'est compté qu'une fois : la clé primaire de {@code account_role}
+     * est {@code (account_id, role_id)}.
+     */
+    @Query("""
+            select count(a)
+            from AuthAccount a
+            join a.roles r
+            where r.name = :roleName
+              and a.status = :status
+              and a.id <> :excludedAccountId
+            """)
+    long countByRoleNameAndStatusExcludingAccount(
+            @Param("roleName") String roleName,
+            @Param("status") AccountStatus status,
+            @Param("excludedAccountId") UUID excludedAccountId);
 }

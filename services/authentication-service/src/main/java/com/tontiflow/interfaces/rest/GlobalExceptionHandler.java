@@ -1,6 +1,7 @@
 package com.tontiflow.interfaces.rest;
 
 import com.tontiflow.application.exception.AccountDisabledException;
+import com.tontiflow.application.exception.AdminGuardrailViolationException;
 import com.tontiflow.application.exception.AccountLockedException;
 import com.tontiflow.application.exception.AccountNotFoundException;
 import com.tontiflow.application.exception.AccountNotFoundInAdminException;
@@ -135,6 +136,12 @@ public class GlobalExceptionHandler {
         // Message generique fixe (jamais ex.getMessage()) - coherent avec tous les
         // handlers ci-dessus, aucun n'expose le message dynamique d'une exception.
         return build(HttpStatus.BAD_REQUEST, "Invalid account status transition", request);
+    }
+
+    @ExceptionHandler(AdminGuardrailViolationException.class)
+    public ResponseEntity<ErrorResponse> handleAdminGuardrailViolation(HttpServletRequest request) {
+        // Decision F-4 : message generique fixe, qui ne revele pas quelle regle a joue.
+        return build(HttpStatus.CONFLICT, "Operation not allowed", request);
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

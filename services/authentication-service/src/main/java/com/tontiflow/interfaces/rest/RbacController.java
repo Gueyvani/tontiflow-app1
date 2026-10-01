@@ -96,8 +96,12 @@ public class RbacController {
     }
 
     @DeleteMapping("/accounts/{accountId}/roles/{roleId}")
-    public ResponseEntity<Void> removeRoleFromAccount(@PathVariable UUID accountId, @PathVariable UUID roleId) {
-        authAccountService.removeRole(accountId, roleId);
+    public ResponseEntity<Void> removeRoleFromAccount(
+            @PathVariable UUID accountId, @PathVariable UUID roleId, Authentication authentication) {
+        // Acteur derive du JWT verifie (jamais du client), comme pour updateAccountStatus : les
+        // garde-fous d'integrite (decision F-4) sont appliques par AuthAccountService.
+        UserContext caller = (UserContext) authentication.getPrincipal();
+        authAccountService.removeRole(accountId, roleId, caller.userId());
         return ResponseEntity.noContent().build();
     }
 

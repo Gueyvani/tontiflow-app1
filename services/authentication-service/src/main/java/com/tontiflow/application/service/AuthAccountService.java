@@ -5,6 +5,7 @@ import com.tontiflow.application.exception.AccountDisabledException;
 import com.tontiflow.application.exception.AccountLockedException;
 import com.tontiflow.application.exception.AccountNotFoundException;
 import com.tontiflow.application.exception.AccountNotFoundInAdminException;
+import com.tontiflow.application.exception.AdminGuardrailViolationException;
 import com.tontiflow.application.exception.InvalidAccountStatusTransitionException;
 import com.tontiflow.application.exception.InvalidCredentialsException;
 import com.tontiflow.application.exception.RoleAlreadyAssignedException;
@@ -76,6 +77,15 @@ public class AuthAccountService {
      */
     private record AuthenticationOutcome(AuthAccount account, long resetWaitNanos) {
     }
+
+    /**
+     * Nom du rôle administrateur (décision F-4). Seed V2 : la ligne {@code role} correspondante sert
+     * aussi de mutex à toutes les opérations qui peuvent réduire l'ensemble des administrateurs actifs.
+     */
+    private static final String ADMIN_ROLE_NAME = "ROLE_ADMIN";
+
+    /** Message fixe de {@link AdminGuardrailViolationException} (jamais la règle exacte). */
+    private static final String GUARDRAIL_MESSAGE = "Operation not allowed";
 
     /** Table de délai fixe (décision R21-D.5, non configurable) — voir {@link AuthAccountRepository#registerFailedAttempt}. */
     private static final Duration DELAY_AT_THREE_FAILURES = Duration.ofSeconds(2);
@@ -641,19 +651,78 @@ public class AuthAccountService {
     /**
      * Retire un rôle d'un compte.
      *
-     * @param accountId identifiant du compte
-     * @param roleId    identifiant du rôle à retirer
-     * @throws AccountNotFoundInAdminException si le compte n'existe pas
-     * @throws RoleNotAssignedException        si le compte ne possède pas ce rôle
+     * <p><strong>Garde-fous d'intégrité (décision F-4)</strong>, uniquement lorsque le rôle retiré est
+     * {@code ROLE_ADMIN} (tout autre rôle : comportement inchangé, ni verrou ni comptage) :</p>
+     * <ol>
+     *   <li>verrou {@link LockModeType#PESSIMISTIC_WRITE} sur la ligne {@code ROLE_ADMIN}, mutex de toutes
+     *       les opérations qui peuvent réduire l'ensemble des administrateurs actifs (deux retraits
+     *       croisés ne peuvent plus vérifier « il reste un admin » simultanément) ;</li>
+     *   <li>relecture réelle de la cible ({@link EntityManager#refresh}) : état commité, pas l'état
+     *       lu avant l'attente du verrou ;</li>
+     *   <li>si le rôle n'est plus attribué : comportement existant ({@link RoleNotAssignedException}) ;</li>
+     *   <li>auto-retrait ({@code actorAccountId} = {@code accountId}) refusé ;</li>
+     *   <li>refus si la cible est un administrateur <b>actif</b> (statut {@code ACTIVE} et
+     *       {@code ROLE_ADMIN}) et qu'aucun autre ne resterait.</li>
+     * </ol>
+     * <p>Le verrou est tenu jusqu'au commit de cette transaction. Ordre de verrouillage : ligne du rôle
+     * puis lignes de comptes (jamais l'inverse), donc aucun cycle avec {@link #login}, qui ne prend que
+     * le verrou de compte.</p>
+     *
+     * @param accountId      identifiant du compte
+     * @param roleId         identifiant du rôle à retirer
+     * @param actorAccountId administrateur acteur, dérivé du contexte d'authentification vérifié (JWT)
+     * @throws AccountNotFoundInAdminException  si le compte n'existe pas
+     * @throws RoleNotAssignedException         si le compte ne possède pas ce rôle
+     * @throws AdminGuardrailViolationException si l'opération violerait un garde-fou d'intégrité
      */
     @Transactional
-    public void removeRole(UUID accountId, UUID roleId) {
+    public void removeRole(UUID accountId, UUID roleId, UUID actorAccountId) {
         AuthAccount account = authAccountRepository.findById(accountId)
                 .orElseThrow(() -> new AccountNotFoundInAdminException("Compte introuvable"));
+
+        // Les noms de role sont immuables (aucun endpoint ne les modifie) : lecture avant verrou sure.
+        Optional<Role> adminRole = roleRepository.findByName(ADMIN_ROLE_NAME);
+        if (adminRole.isPresent() && adminRole.get().getId().equals(roleId)) {
+            lockAdminRoleAndRefresh(adminRole.get(), account);
+            boolean holdsAdminRole = account.getRoles().stream().anyMatch(r -> r.getId().equals(roleId));
+            if (holdsAdminRole) {
+                if (accountId.equals(actorAccountId)) {
+                    throw new AdminGuardrailViolationException(GUARDRAIL_MESSAGE);
+                }
+                if (isActiveAdmin(account, adminRole.get())) {
+                    requireAnotherActiveAdmin(account);
+                }
+            }
+        }
 
         boolean removed = account.getRoles().removeIf(r -> r.getId().equals(roleId));
         if (!removed) {
             throw new RoleNotAssignedException("Ce role n'est pas attribue a ce compte");
+        }
+    }
+
+    /**
+     * Prend le verrou du mutex des administrateurs puis relit la cible (décision F-4). Le verrou seul
+     * n'actualise pas nécessairement une entité déjà gérée : {@code refresh()} après {@code lock()} est
+     * la seule garantie non ambiguë (même motif que {@link #login}).
+     */
+    private void lockAdminRoleAndRefresh(Role adminRole, AuthAccount account) {
+        entityManager.lock(adminRole, LockModeType.PESSIMISTIC_WRITE);
+        entityManager.refresh(account);
+    }
+
+    /** Administrateur actif = statut {@code ACTIVE} <b>et</b> rôle {@code ROLE_ADMIN} (état de la cible déjà relu). */
+    private static boolean isActiveAdmin(AuthAccount account, Role adminRole) {
+        return account.getStatus() == AccountStatus.ACTIVE
+                && account.getRoles().stream().anyMatch(r -> r.getId().equals(adminRole.getId()));
+    }
+
+    /** Refuse si aucun AUTRE administrateur actif n'existe (comptage sur le statut réel en base). */
+    private void requireAnotherActiveAdmin(AuthAccount account) {
+        long others = authAccountRepository.countByRoleNameAndStatusExcludingAccount(
+                ADMIN_ROLE_NAME, AccountStatus.ACTIVE, account.getId());
+        if (others == 0) {
+            throw new AdminGuardrailViolationException(GUARDRAIL_MESSAGE);
         }
     }
 
@@ -745,6 +814,16 @@ public class AuthAccountService {
                     "Transition " + currentStatus + " -> " + targetStatus + " non autorisee");
         }
 
+        // Garde-fous d'integrite (decision F-4), pour toute transition dont la CIBLE n'est pas ACTIVE
+        // (ACTIVE -> LOCKED/DISABLED, LOCKED -> DISABLED) : idempotence et matrice ci-dessus restent
+        // inchangees. Condition sur targetStatus SEUL, jamais sur currentStatus (lu avant le verrou
+        // ci-dessous, donc potentiellement perime par une course concurrente) - un declenchement fonde
+        // sur cette lecture perimee laisserait passer une transition LOCKED -> DISABLED reconstruite
+        // via une reactivation concurrente entre cette lecture et l'UPDATE plus bas.
+        if (targetStatus != AccountStatus.ACTIVE) {
+            enforceAdminGuardrailsBeforeLeavingActive(account, actorAccountId);
+        }
+
         List<String> allowedSourceNames = allowedSources.stream().map(Enum::name).toList();
         int updated = authAccountRepository.transitionStatusIfAllowed(accountId, targetStatus.name(), allowedSourceNames);
 
@@ -777,5 +856,30 @@ public class AuthAccountService {
         accountStatusChangeRepository.save(event);
 
         return account;
+    }
+
+    /**
+     * Garde-fous F-4 avant toute transition dont la cible n'est pas {@code ACTIVE} : (A) un administrateur
+     * ne se verrouille ni ne se désactive lui-même ; (C) le dernier administrateur <b>actif</b> ne peut pas
+     * en sortir. Appelée sur {@code targetStatus} seul (jamais sur le {@code currentStatus} lu avant le
+     * verrou) : la règle A est donc évaluée sans dépendre d'aucun statut périmé, et la règle C est évaluée
+     * sur {@code account.getStatus()} <b>après</b> {@link #lockAdminRoleAndRefresh}, c'est-à-dire l'état
+     * réellement commité au moment du verrou — jamais l'état lu par {@link #changeAccountStatus} avant son
+     * acquisition. Si ce statut relu n'est déjà plus {@code ACTIVE}, {@link #isActiveAdmin} est faux et rien
+     * n'est à protéger ; l'{@code UPDATE} conditionnel qui suit traite la course comme avant (idempotence ou
+     * rejet par la matrice de transitions).
+     */
+    private void enforceAdminGuardrailsBeforeLeavingActive(AuthAccount account, UUID actorAccountId) {
+        if (account.getId().equals(actorAccountId)) {
+            throw new AdminGuardrailViolationException(GUARDRAIL_MESSAGE);
+        }
+        Optional<Role> adminRole = roleRepository.findByName(ADMIN_ROLE_NAME);
+        if (adminRole.isEmpty()) {
+            return; // aucun role administrateur : rien a proteger
+        }
+        lockAdminRoleAndRefresh(adminRole.get(), account);
+        if (isActiveAdmin(account, adminRole.get())) {
+            requireAnotherActiveAdmin(account);
+        }
     }
 }
