@@ -86,4 +86,122 @@ class ClientIpResolverTest {
 
         assertThat(resolver.resolve(exchange(null, null))).isEqualTo("unknown");
     }
+
+    // ------------------------------------------------------------------
+    // N-2 : normalisation IPv6 par préfixe (ClientIpResolver.resolve)
+    // ------------------------------------------------------------------
+
+    private static MockServerWebExchange exchangeWithPeer(String ip) {
+        return exchange(new InetSocketAddress(ip, 44444), null);
+    }
+
+    @Test
+    void ipv4_isNeverTruncated_literalAddressUnchanged() {
+        ClientIpResolver resolver = new ClientIpResolver(0);
+
+        assertThat(resolver.resolve(exchangeWithPeer("192.168.1.10"))).isEqualTo("192.168.1.10");
+    }
+
+    @Test
+    void twoDifferentIpv4Addresses_remainDistinct() {
+        ClientIpResolver resolver = new ClientIpResolver(0);
+
+        String a = resolver.resolve(exchangeWithPeer("192.168.1.10"));
+        String b = resolver.resolve(exchangeWithPeer("192.168.1.11"));
+
+        assertThat(a).isNotEqualTo(b);
+        assertThat(a).isEqualTo("192.168.1.10");
+        assertThat(b).isEqualTo("192.168.1.11");
+    }
+
+    @Test
+    void twoIpv6AddressesOfSamePrefix_produceTheSameKey() {
+        ClientIpResolver resolver = new ClientIpResolver(0);
+
+        String a = resolver.resolve(exchangeWithPeer("2001:db8:1234:5678::1"));
+        String b = resolver.resolve(exchangeWithPeer("2001:db8:1234:5678::2"));
+        String c = resolver.resolve(exchangeWithPeer("2001:db8:1234:5678::ffff"));
+
+        assertThat(a).isEqualTo(b).isEqualTo(c).isEqualTo("2001:db8:1234:5678:0:0:0:0/64");
+    }
+
+    @Test
+    void twoIpv6AddressesOfDifferentPrefixes_produceDifferentKeys() {
+        ClientIpResolver resolver = new ClientIpResolver(0);
+
+        String a = resolver.resolve(exchangeWithPeer("2001:db8:1234:5678::1"));
+        String b = resolver.resolve(exchangeWithPeer("2001:db8:1234:5679::1"));
+
+        assertThat(a).isNotEqualTo(b);
+    }
+
+    @Test
+    void ipv6CompressedAndExpandedForms_produceTheSameKey() {
+        ClientIpResolver resolver = new ClientIpResolver(0);
+
+        String compressed = resolver.resolve(exchangeWithPeer("2001:db8:1234:5678::1"));
+        String expanded = resolver.resolve(exchangeWithPeer("2001:0db8:1234:5678:0000:0000:0000:0001"));
+
+        assertThat(compressed).isEqualTo(expanded);
+    }
+
+    @Test
+    void ipv4MappedIpv6Literal_isExposedAsIpv4_andNeverTruncated() {
+        // Vérifié empiriquement (JDK 21, cette base de code) : le JDK normalise toujours une
+        // adresse IPv4-mappée IPv6 en Inet4Address, y compris depuis une vraie connexion socket -
+        // ce test confirme que ClientIpResolver en hérite naturellement, sans code spécial.
+        ClientIpResolver resolver = new ClientIpResolver(0);
+
+        String resolved = resolver.resolve(exchangeWithPeer("::ffff:192.168.1.10"));
+
+        assertThat(resolved).isEqualTo("192.168.1.10");
+    }
+
+    @Test
+    void unknownIp_behaviorUnchanged() {
+        ClientIpResolver resolver = new ClientIpResolver(0);
+
+        assertThat(resolver.resolve(exchange(null, null))).isEqualTo("unknown");
+    }
+
+    @Test
+    void validIpv6_isNeverResolvedAsUnknown() {
+        ClientIpResolver resolver = new ClientIpResolver(0);
+
+        assertThat(resolver.resolve(exchangeWithPeer("2001:db8:1234:5678::1"))).isNotEqualTo("unknown");
+    }
+
+    @Test
+    void configurablePrefixLength_isHonored() {
+        ClientIpResolver resolver48 = new ClientIpResolver(0, 48);
+
+        String a = resolver48.resolve(exchangeWithPeer("2001:db8:1234:5678::1"));
+        String b = resolver48.resolve(exchangeWithPeer("2001:db8:1234:9999::1"));
+
+        // Même /48 (2001:db8:1234::/48) malgré des 4e groupes différents (5678 vs 9999).
+        assertThat(a).isEqualTo(b).isEqualTo("2001:db8:1234:0:0:0:0:0/48");
+    }
+
+    @Test
+    void prefixLength128_keepsEachAddressDistinct_equivalentToPreCorrectionBehavior() {
+        ClientIpResolver resolver128 = new ClientIpResolver(0, 128);
+
+        String a = resolver128.resolve(exchangeWithPeer("2001:db8:1234:5678::1"));
+        String b = resolver128.resolve(exchangeWithPeer("2001:db8:1234:5678::2"));
+
+        assertThat(a).isNotEqualTo(b);
+        assertThat(a).isEqualTo("2001:db8:1234:5678:0:0:0:1/128");
+    }
+
+    @Test
+    void prefixLengthBelowMinimum_isRejectedAtConstruction() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new ClientIpResolver(0, 0))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void prefixLengthAboveMaximum_isRejectedAtConstruction() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new ClientIpResolver(0, 129))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
 }

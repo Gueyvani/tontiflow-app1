@@ -242,4 +242,27 @@ class AuthIpRateLimitFilterTest {
             assertThat(passesThrough(encodedRequest(HttpMethod.GET, ENCODED_VARIANTS[0], "10.20.1.3"))).isTrue();
         }
     }
+
+    // ------------------------------------------------------------------
+    // N-2 : test de non-régression - rotation d'adresses IPv6 du même /64.
+    // ------------------------------------------------------------------
+
+    @Test
+    void ipv6SamePrefix_sharesTheQuota_secondAddressDoesNotGetAFreshBudget() {
+        for (int i = 0; i < LOGIN_LIMIT; i++) {
+            assertThat(passesThrough(login("2001:db8:1234:5678::1"))).isTrue();
+        }
+        // IPv6-B du MEME /64 que IPv6-A : avant la correction N-2, obtenait un budget neuf.
+        assertThat(passesThrough(login("2001:db8:1234:5678::2"))).isFalse();
+    }
+
+    @Test
+    void ipv6DifferentPrefix_remainsIndependent() {
+        for (int i = 0; i < LOGIN_LIMIT; i++) {
+            assertThat(passesThrough(login("2001:db8:1234:5678::1"))).isTrue();
+        }
+        assertThat(passesThrough(login("2001:db8:1234:5678::2"))).isFalse();
+        // IPv6-C d'un /64 DIFFERENT : doit rester un client distinct, non affecte par le quota epuise ci-dessus.
+        assertThat(passesThrough(login("2001:db8:1234:5679::1"))).isTrue();
+    }
 }

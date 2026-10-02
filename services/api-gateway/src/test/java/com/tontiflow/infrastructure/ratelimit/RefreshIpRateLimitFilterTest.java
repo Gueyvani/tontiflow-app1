@@ -265,4 +265,25 @@ class RefreshIpRateLimitFilterTest {
             assertThat(passesThrough(encodedRequest(HttpMethod.GET, ENCODED_VARIANTS[0], "10.20.3.3"))).isTrue();
         }
     }
+
+    // ------------------------------------------------------------------
+    // N-2 : test de non-régression - rotation d'adresses IPv6 du même /64.
+    // ------------------------------------------------------------------
+
+    @Test
+    void ipv6SamePrefix_sharesTheQuota_secondAddressDoesNotGetAFreshBudget() {
+        for (int i = 0; i < REFRESH_LIMIT; i++) {
+            assertThat(passesThrough(refresh("2001:db8:1234:5678::1"))).isTrue();
+        }
+        assertThat(passesThrough(refresh("2001:db8:1234:5678::2"))).isFalse();
+    }
+
+    @Test
+    void ipv6DifferentPrefix_remainsIndependent() {
+        for (int i = 0; i < REFRESH_LIMIT; i++) {
+            assertThat(passesThrough(refresh("2001:db8:1234:5678::1"))).isTrue();
+        }
+        assertThat(passesThrough(refresh("2001:db8:1234:5678::2"))).isFalse();
+        assertThat(passesThrough(refresh("2001:db8:1234:5679::1"))).isTrue();
+    }
 }

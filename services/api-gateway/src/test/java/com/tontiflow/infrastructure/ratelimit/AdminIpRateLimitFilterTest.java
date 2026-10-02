@@ -378,4 +378,25 @@ class AdminIpRateLimitFilterTest {
             assertThat(passesThrough(encodedRequest(HttpMethod.GET, "/api/v1/adm%69nistration/x", "10.20.5.4"))).isTrue();
         }
     }
+
+    // ------------------------------------------------------------------
+    // N-2 : test de non-régression - rotation d'adresses IPv6 du même /64.
+    // ------------------------------------------------------------------
+
+    @Test
+    void ipv6SamePrefix_sharesTheQuota_secondAddressDoesNotGetAFreshBudget() {
+        for (int i = 0; i < ADMIN_LIMIT; i++) {
+            assertThat(passesThrough(request(HttpMethod.GET, "/api/v1/admin/permissions", "2001:db8:1234:5678::1"))).isTrue();
+        }
+        assertThat(passesThrough(request(HttpMethod.GET, "/api/v1/admin/permissions", "2001:db8:1234:5678::2"))).isFalse();
+    }
+
+    @Test
+    void ipv6DifferentPrefix_remainsIndependent() {
+        for (int i = 0; i < ADMIN_LIMIT; i++) {
+            assertThat(passesThrough(request(HttpMethod.GET, "/api/v1/admin/permissions", "2001:db8:1234:5678::1"))).isTrue();
+        }
+        assertThat(passesThrough(request(HttpMethod.GET, "/api/v1/admin/permissions", "2001:db8:1234:5678::2"))).isFalse();
+        assertThat(passesThrough(request(HttpMethod.GET, "/api/v1/admin/permissions", "2001:db8:1234:5679::1"))).isTrue();
+    }
 }
